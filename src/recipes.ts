@@ -1,0 +1,2592 @@
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { readFileIfExists, projectName } from "./project.js";
+import type { ChangeSet, DoctorReport, PackageJson, PlannedChange, ProjectContext } from "./types.js";
+
+type JsonObject = Record<string, unknown>;
+
+export interface RecipeOptions {
+  positionals: string[];
+  flags: Record<string, string | boolean>;
+}
+
+export async function createFixChangeSet(ctx: ProjectContext, report: DoctorReport): Promise<ChangeSet> {
+  const changes: PlannedChange[] = [];
+  const warnings: string[] = [];
+
+  if (ctx.framework === "nextjs" && shouldPatchOpenNext(report)) {
+    const result = await nextOpenNextRecipe(ctx);
+    changes.push(...result.changes);
+    warnings.push(...result.warnings);
+  }
+
+  return withTomlWarning(ctx, {
+    status: changes.length > 0 ? "planned" : "empty",
+    title: changes.length > 0 ? "Safe Cloudflare readiness fixes" : "No automatic fixes available",
+    changes,
+    warnings,
+    nextActions: changes.length > 0
+      ? ["flarecel fix --apply --yes", "flarecel verify --json"]
+      : ["flarecel plan --json"]
+  });
+}
+
+export async function createRecipeChangeSet(
+  ctx: ProjectContext,
+  recipeName: string,
+  options: RecipeOptions
+): Promise<ChangeSet> {
+  return withTomlWarning(ctx, await resolveRecipeChangeSet(ctx, recipeName, options));
+}
+
+function withTomlWarning(ctx: ProjectContext, changeSet: ChangeSet): ChangeSet {
+  if (ctx.wrangler.format !== "toml") return changeSet;
+  if (!changeSet.changes.some((change) => change.path === "wrangler.jsonc")) return changeSet;
+
+  return {
+    ...changeSet,
+    warnings: [
+      `Existing ${path.basename(ctx.wrangler.path ?? "wrangler.toml")} was left untouched; Flarecel generated wrangler.jsonc instead. Having both can cause ambiguous Wrangler config. Migrate to one format before deploy.`,
+      ...changeSet.warnings
+    ]
+  };
+}
+
+async function resolveRecipeChangeSet(
+  ctx: ProjectContext,
+  recipeName: string,
+  options: RecipeOptions
+): Promise<ChangeSet> {
+  if (recipeName === "next-opennext") return nextOpenNextRecipe(ctx);
+
+  if (recipeName === "r2") {
+    const kind = options.positionals[0] ?? "uploads";
+    if (kind !== "uploads") return unknownRecipe(`r2 ${kind}`);
+    return r2UploadsRecipe(ctx);
+  }
+
+  if (recipeName === "rate-limit") return rateLimitRecipe(ctx, options);
+
+  if (recipeName === "db") {
+    const db = options.positionals[0] ?? "d1";
+    const orm = String(options.flags.orm ?? "drizzle");
+    if (db === "d1" && orm === "drizzle") return d1DrizzleRecipe(ctx);
+    return unknownRecipe(`db ${db} --orm ${orm}`);
+  }
+
+  if (recipeName === "kv") {
+    const kind = options.positionals[0] ?? "cache";
+    if (kind !== "cache") return unknownRecipe(`kv ${kind}`);
+    return kvCacheRecipe(ctx);
+  }
+
+  if (recipeName === "turnstile") return turnstileRecipe(ctx, options);
+
+  if (recipeName === "cron") {
+    const cronName = options.positionals[0] ?? "daily-cleanup";
+    return cronRecipe(ctx, cronName, options);
+  }
+
+  if (recipeName === "workers-ai") return workersAiRecipe(ctx, options);
+
+  if (recipeName === "vectorize") {
+    const indexName = options.positionals[0] ?? "docs-search";
+    return vectorizeRecipe(ctx, indexName, options);
+  }
+
+  if (recipeName === "ai-gateway") return aiGatewayRecipe(ctx, options);
+
+  if (recipeName === "observability" || recipeName === "monitor") {
+    return observabilityRecipe(ctx, options);
+  }
+
+  if (recipeName === "durable-object" || recipeName === "do") {
+    const objectName = options.positionals[0] ?? "room";
+    return durableObjectRecipe(ctx, objectName);
+  }
+
+  if (recipeName === "workflow" || recipeName === "workflows") {
+    const workflowName = options.positionals[0] ?? "onboarding";
+    return workflowRecipe(ctx, workflowName, options);
+  }
+
+  if (recipeName === "browser-run" || recipeName === "browser-rendering") {
+    return browserRunRecipe(ctx);
+  }
+
+  if (recipeName === "queue") {
+    const queueName = options.positionals[0] ?? "jobs";
+    return queueRecipe(ctx, queueName);
+  }
+
+  if (recipeName === "auth" && options.positionals[0] === "better-auth") {
+    return betterAuthRecipe(ctx, options);
+  }
+
+  return unknownRecipe(recipeName);
+}
+
+async function nextOpenNextRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  if (!ctx.packageJson) {
+    return {
+      status: "error",
+      title: "Cannot patch project without package.json",
+      changes: [],
+      warnings: [],
+      nextActions: ["Create a package.json first."]
+    };
+  }
+
+  const changes: PlannedChange[] = [];
+  changes.push(await packageJsonChange(ctx, "Add OpenNext Cloudflare dependencies and scripts", (pkg) => {
+    pkg.dependencies = pkg.dependencies ?? {};
+    pkg.devDependencies = pkg.devDependencies ?? {};
+    pkg.scripts = pkg.scripts ?? {};
+
+    pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+    pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+    pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+
+    pkg.scripts.build = pkg.scripts.build ?? "next build";
+    pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";
+    pkg.scripts.deploy = "opennextjs-cloudflare build && opennextjs-cloudflare deploy";
+    pkg.scripts.upload = "opennextjs-cloudflare build && opennextjs-cloudflare upload";
+    pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+  }));
+
+  changes.push(await wranglerChange(ctx, "Configure OpenNext Worker entry, assets, and compatibility flags", (config) => {
+    config.$schema = config.$schema ?? "node_modules/wrangler/config-schema.json";
+    config.name = config.name ?? projectName(ctx);
+    config.main = ".open-next/worker.js";
+    config.compatibility_date = config.compatibility_date ?? today();
+    config.compatibility_flags = addUniqueStrings(config.compatibility_flags, [
+      "nodejs_compat",
+      "global_fetch_strictly_public"
+    ]);
+    config.assets = {
+      directory: ".open-next/assets",
+      binding: "ASSETS"
+    };
+    config.services = upsertArrayObject(config.services, "binding", {
+      binding: "WORKER_SELF_REFERENCE",
+      service: String(config.name)
+    });
+  }));
+
+  changes.push(await fileChange(ctx, "open-next.config.ts", openNextConfig(), "Add explicit OpenNext Cloudflare config"));
+  changes.push(await appendLineChange(ctx, ".dev.vars", "NEXTJS_ENV=development", "Set local Next.js env for OpenNext dev bindings"));
+  changes.push(await appendLineChange(ctx, ".gitignore", ".open-next", "Ignore OpenNext build output"));
+  changes.push(await ensureHeadersChange(ctx));
+
+  return {
+    status: "planned",
+    title: "Add OpenNext Cloudflare support",
+    changes: changes.filter((change) => change.before !== change.after),
+    warnings: [
+      "This does not run npm install. Install dependencies after applying patches.",
+      "If your app exports runtime = \"edge\", remove it manually before deploy."
+    ],
+    nextActions: [
+      "npm install",
+      "npm run cf-typegen",
+      "flarecel verify --json",
+      "npm run preview"
+    ]
+  };
+}
+
+async function r2UploadsRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  const binding = "UPLOADS";
+  const bucket = `${projectName(ctx)}-uploads`;
+  const routePath = nextRoutePath(ctx, "uploads");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for R2", (pkg) => {
+      if (ctx.framework === "nextjs") {
+        pkg.dependencies = pkg.dependencies ?? {};
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+      }
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+    }),
+    await wranglerChange(ctx, "Bind an R2 bucket for uploads", (config) => {
+      config.r2_buckets = upsertArrayObject(config.r2_buckets, "binding", {
+        binding,
+        bucket_name: bucket
+      });
+    }),
+    await fileChange(ctx, routePath, r2UploadRoute(binding), "Add Next.js route handler for R2 uploads"),
+    await appendEnvType(ctx, `${binding}: R2Bucket;`, "Add R2 binding type"),
+    await fileChange(ctx, "docs/flarecel-r2-uploads.md", r2UploadsDoc(binding, bucket, routePath), "Explain R2 uploads recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add R2 uploads",
+    changes,
+    warnings: [
+      "Flarecel updates config and code, but it does not create the remote bucket yet.",
+      "Create the bucket with Wrangler before production deploy."
+    ],
+    nextActions: [
+      `wrangler r2 bucket create ${bucket}`,
+      "npm run cf-typegen",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function rateLimitRecipe(ctx: ProjectContext, options: RecipeOptions): Promise<ChangeSet> {
+  const parsedLimit = parseLimit(String(options.flags.limit ?? "20/min"));
+  const route = String(options.flags.route ?? "/api/*");
+  const binding = "RATE_LIMITER";
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for Rate Limiting", (pkg) => {
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+    }),
+    await wranglerChange(ctx, "Add Cloudflare Rate Limiting binding", (config) => {
+      config.ratelimits = upsertArrayObject(config.ratelimits, "name", {
+        name: binding,
+        namespace_id: "1001",
+        simple: {
+          limit: parsedLimit.limit,
+          period: parsedLimit.period
+        }
+      });
+    }),
+    await fileChange(ctx, "src/cloudflare/rate-limit.ts", rateLimitHelper(binding), "Add reusable rate limit helper"),
+    await appendEnvType(ctx, `${binding}: RateLimit;`, "Add Rate Limiting binding type"),
+    await fileChange(ctx, "docs/flarecel-rate-limit.md", rateLimitDoc(binding, route, parsedLimit), "Explain Rate Limiting recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add Cloudflare Rate Limiting",
+    changes,
+    warnings: [
+      "Cloudflare Rate Limiting counters are local to each Cloudflare location and are not exact billing meters.",
+      "The namespace_id should be changed if this limiter must not share counters with another Worker."
+    ],
+    nextActions: [
+      "Wire enforceRateLimit into the selected route.",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function d1DrizzleRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  const databaseName = `${projectName(ctx)}-db`;
+  const binding = "DB";
+  const schemaFile = nextDbPath(ctx, "schema.ts");
+  const dbFile = nextLibPath(ctx, "db.ts");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add D1, Drizzle, and migration scripts", (pkg) => {
+      pkg.dependencies = pkg.dependencies ?? {};
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.scripts = pkg.scripts ?? {};
+
+      pkg.dependencies["drizzle-orm"] = pkg.dependencies["drizzle-orm"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["drizzle-kit"] = pkg.devDependencies["drizzle-kit"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+      pkg.scripts["db:generate"] = "drizzle-kit generate";
+      pkg.scripts["db:migrate:local"] = `wrangler d1 migrations apply ${databaseName} --local`;
+      pkg.scripts["db:migrate:remote"] = `wrangler d1 migrations apply ${databaseName} --remote`;
+    }),
+    await wranglerChange(ctx, "Bind a D1 database", (config) => {
+      config.d1_databases = upsertArrayObject(config.d1_databases, "binding", {
+        binding,
+        database_name: databaseName,
+        database_id: "replace-with-d1-database-id",
+        migrations_dir: "drizzle"
+      });
+    }),
+    await fileChange(ctx, schemaFile, d1DrizzleSchema(), "Add starter Drizzle schema for D1"),
+    await fileChange(ctx, dbFile, d1DrizzleHelper(dbFile, schemaFile), "Add typed D1/Drizzle helper"),
+    await fileChange(ctx, "drizzle.config.ts", drizzleConfig(schemaFile), "Add Drizzle migration config"),
+    await appendEnvType(ctx, `${binding}: D1Database;`, "Add D1 binding type"),
+    await fileChange(ctx, "docs/flarecel-d1-drizzle.md", d1DrizzleDoc(databaseName, binding, schemaFile), "Explain D1 + Drizzle recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add D1 with Drizzle",
+    changes,
+    warnings: [
+      "Flarecel updates config and code, but it does not create the remote D1 database yet.",
+      "Copy the database_id returned by Wrangler into wrangler.jsonc before production deploy."
+    ],
+    nextActions: [
+      `wrangler d1 create ${databaseName}`,
+      "Copy the returned database_id into wrangler.jsonc.",
+      "npm install",
+      "npm run db:generate",
+      "npm run db:migrate:local",
+      "npm run db:migrate:remote",
+      "npm run cf-typegen",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function kvCacheRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  const binding = "CACHE";
+  const namespaceName = `${projectName(ctx)}-cache`;
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for KV", (pkg) => {
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+    }),
+    await wranglerChange(ctx, "Bind a KV namespace for cache data", (config) => {
+      config.kv_namespaces = upsertArrayObject(config.kv_namespaces, "binding", {
+        binding,
+        id: "replace-with-kv-namespace-id"
+      });
+    }),
+    await fileChange(ctx, "src/cloudflare/kv-cache.ts", kvCacheHelper(binding), "Add typed KV cache helper"),
+    await appendEnvType(ctx, `${binding}: KVNamespace;`, "Add KV binding type"),
+    await fileChange(ctx, "docs/flarecel-kv-cache.md", kvCacheDoc(binding, namespaceName), "Explain KV cache recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add KV cache",
+    changes,
+    warnings: [
+      "KV is eventually consistent. Do not use it for strict counters, transactions, or billing-critical state.",
+      "Flarecel updates config and code, but it does not create the remote KV namespace yet."
+    ],
+    nextActions: [
+      `wrangler kv namespace create ${binding}`,
+      "Copy the returned id into wrangler.jsonc.",
+      "npm run cf-typegen",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function turnstileRecipe(ctx: ProjectContext, options: RecipeOptions): Promise<ChangeSet> {
+  const formName = sanitizeFeatureName(String(options.flags.form ?? options.positionals[0] ?? "signup"));
+  const routePath = nextRoutePath(ctx, `turnstile/${formName}/verify`);
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for Turnstile env values", (pkg) => {
+      if (ctx.framework === "nextjs") {
+        pkg.dependencies = pkg.dependencies ?? {};
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+      }
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+    }),
+    await fileChange(ctx, "src/cloudflare/turnstile.ts", turnstileHelper(), "Add Turnstile Siteverify helper"),
+    await fileChange(ctx, routePath, turnstileRoute(routePath), "Add Next.js Turnstile verification route"),
+    await appendLinesChange(ctx, ".dev.vars.example", [
+      "TURNSTILE_SECRET_KEY=replace-with-turnstile-secret-key",
+      "NEXT_PUBLIC_TURNSTILE_SITE_KEY=replace-with-turnstile-site-key"
+    ], "Document Turnstile environment values"),
+    await appendEnvTypes(ctx, [
+      "TURNSTILE_SECRET_KEY: string;",
+      "NEXT_PUBLIC_TURNSTILE_SITE_KEY?: string;"
+    ], "Add Turnstile env types"),
+    await fileChange(ctx, "docs/flarecel-turnstile.md", turnstileDoc(formName, routePath), "Explain Turnstile recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: `Add Turnstile protection for ${formName}`,
+    changes,
+    warnings: [
+      "The client-side widget alone is not enough. Your server must validate every Turnstile token.",
+      "Do not commit the real TURNSTILE_SECRET_KEY. Store it as a Wrangler secret in production."
+    ],
+    nextActions: [
+      "wrangler secret put TURNSTILE_SECRET_KEY",
+      "Add NEXT_PUBLIC_TURNSTILE_SITE_KEY to your frontend environment.",
+      "Wire the generated verification route into the protected form submit flow.",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function cronRecipe(ctx: ProjectContext, cronNameInput: string, options: RecipeOptions): Promise<ChangeSet> {
+  const cronName = sanitizeFeatureName(cronNameInput);
+  const schedule = String(options.flags.schedule ?? "0 0 * * *");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for Cron Triggers", (pkg) => {
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+    }),
+    await wranglerChange(ctx, "Add Cloudflare Cron Trigger", (config) => {
+      const triggers = asObject(config.triggers);
+      triggers.crons = addUniqueStrings(triggers.crons, [schedule]);
+      config.triggers = triggers;
+    }),
+    await fileChange(ctx, `src/cloudflare/cron/${cronName}.ts`, cronHelper(cronName), "Add scheduled job helper"),
+    await fileChange(ctx, `docs/flarecel-cron-${cronName}.md`, cronDoc(cronName, schedule), "Explain Cron Trigger recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: `Add Cron Trigger: ${cronName}`,
+    changes,
+    warnings: [
+      "This MVP adds the cron trigger and job helper. Next.js/OpenNext apps may need a custom Worker entry to call the helper from a scheduled handler."
+    ],
+    nextActions: [
+      "Wire the generated helper into your Worker's scheduled handler.",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function workersAiRecipe(ctx: ProjectContext, options: RecipeOptions): Promise<ChangeSet> {
+  const model = String(options.flags.model ?? "@cf/meta/llama-3.1-8b-instruct");
+  const routePath = nextRoutePath(ctx, "ai/generate");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers AI binding support", (pkg) => {
+      if (ctx.framework === "nextjs") {
+        pkg.dependencies = pkg.dependencies ?? {};
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+      }
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+    }),
+    await wranglerChange(ctx, "Bind Workers AI", (config) => {
+      config.ai = {
+        binding: "AI"
+      };
+    }),
+    await fileChange(ctx, "src/cloudflare/workers-ai.ts", workersAiHelper(model), "Add Workers AI helper"),
+    await fileChange(ctx, routePath, workersAiRoute(routePath), "Add Next.js Workers AI route"),
+    await appendEnvType(ctx, "AI: Ai;", "Add Workers AI binding type"),
+    await fileChange(ctx, "docs/flarecel-workers-ai.md", workersAiDoc(model, routePath), "Explain Workers AI recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add Workers AI",
+    changes,
+    warnings: [
+      "Workers AI has per-model usage pricing and daily free allocations. Run flarecel cost with --workers-ai-neurons before production."
+    ],
+    nextActions: [
+      "npm run cf-typegen",
+      "Wire the generated route into your AI UI.",
+      "flarecel cost --workers-ai-neurons 300000 --json",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function vectorizeRecipe(ctx: ProjectContext, indexNameInput: string, options: RecipeOptions): Promise<ChangeSet> {
+  const indexName = `${projectName(ctx)}-${sanitizeFeatureName(indexNameInput)}`;
+  const binding = "VECTORIZE";
+  const dimensions = numericOption(options.flags.dimensions, 768);
+  const metric = parseVectorMetric(String(options.flags.metric ?? "cosine"));
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Vectorize binding support", (pkg) => {
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+    }),
+    await wranglerChange(ctx, "Bind a Vectorize index", (config) => {
+      config.vectorize = upsertArrayObject(config.vectorize, "binding", {
+        binding,
+        index_name: indexName
+      });
+    }),
+    await fileChange(ctx, "src/cloudflare/vectorize.ts", vectorizeHelper(binding), "Add Vectorize helper"),
+    await appendEnvType(ctx, `${binding}: VectorizeIndex;`, "Add Vectorize binding type"),
+    await fileChange(ctx, ".flarecel/resources.json", vectorizeResourceMetadata(indexName, dimensions, metric), "Track Vectorize provisioning metadata"),
+    await fileChange(ctx, "docs/flarecel-vectorize.md", vectorizeDoc(indexName, binding, dimensions, metric), "Explain Vectorize recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: `Add Vectorize index: ${indexNameInput}`,
+    changes,
+    warnings: [
+      "Vectorize index dimensions and metric cannot be changed after creation. Choose them carefully.",
+      "Flarecel updates config and code, but it does not create the remote Vectorize index yet."
+    ],
+    nextActions: [
+      `wrangler vectorize create ${indexName} --dimensions=${dimensions} --metric=${metric}`,
+      "npm run cf-typegen",
+      "flarecel cost --vectorize-queries 30000 --vectorize-stored-vectors 10000 --vectorize-dimensions 768 --json",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function aiGatewayRecipe(ctx: ProjectContext, options: RecipeOptions): Promise<ChangeSet> {
+  const provider = String(options.flags.provider ?? options.positionals[0] ?? "openai");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for AI Gateway env values", (pkg) => {
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+    }),
+    await fileChange(ctx, "src/cloudflare/ai-gateway.ts", aiGatewayHelper(provider), "Add AI Gateway fetch helper"),
+    await appendLinesChange(ctx, ".dev.vars.example", [
+      "CLOUDFLARE_ACCOUNT_ID=replace-with-account-id",
+      "AI_GATEWAY_ID=replace-with-gateway-id",
+      "OPENAI_API_KEY=replace-with-openai-api-key"
+    ], "Document AI Gateway environment values"),
+    await appendEnvTypes(ctx, [
+      "CLOUDFLARE_ACCOUNT_ID: string;",
+      "AI_GATEWAY_ID: string;",
+      "OPENAI_API_KEY?: string;",
+      "CF_AIG_TOKEN?: string;"
+    ], "Add AI Gateway env types"),
+    await fileChange(ctx, "docs/flarecel-ai-gateway.md", aiGatewayDoc(provider), "Explain AI Gateway recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add AI Gateway helper",
+    changes,
+    warnings: [
+      "AI Gateway routes provider calls and improves observability, but provider usage can still bill through the provider or Cloudflare unified billing.",
+      "Do not commit provider API keys. Store production keys as Wrangler secrets."
+    ],
+    nextActions: [
+      "Create an AI Gateway in the Cloudflare dashboard.",
+      "wrangler secret put OPENAI_API_KEY",
+      "Optionally set CF_AIG_TOKEN for authenticated gateways.",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function observabilityRecipe(ctx: ProjectContext, options: RecipeOptions): Promise<ChangeSet> {
+  const sampling = parseSampling(String(options.flags.sampling ?? options.flags["head-sampling-rate"] ?? "1"));
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Wrangler for Workers observability commands", (pkg) => {
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["logs:tail"] = "wrangler tail";
+    }),
+    await wranglerChange(ctx, "Enable Workers Logs observability", (config) => {
+      config.observability = {
+        enabled: true,
+        head_sampling_rate: sampling
+      };
+    }),
+    await fileChange(ctx, "src/cloudflare/observability.ts", observabilityHelper(), "Add request ID and structured logging helpers"),
+    await fileChange(ctx, "docs/flarecel-observability.md", observabilityDoc(sampling), "Explain observability recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add Workers observability",
+    changes,
+    warnings: [
+      "A sampling rate of 1 logs every request. Lower it for high-traffic production apps if log volume is noisy or costly."
+    ],
+    nextActions: [
+      "npm run logs:tail",
+      "Use Cloudflare Workers Logs and Query Builder after deploy.",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function durableObjectRecipe(ctx: ProjectContext, objectNameInput: string): Promise<ChangeSet> {
+  const objectName = sanitizeFeatureName(objectNameInput);
+  const binding = `${objectName.toUpperCase().replace(/-/g, "_")}_DO`;
+  const className = `${pascalCase(objectName)}DurableObject`;
+  const sourcePath = `src/cloudflare/durable-objects/${objectName}.ts`;
+  const routePath = nextRoutePath(ctx, `durable-objects/${objectName}`);
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for Durable Objects", (pkg) => {
+      if (ctx.framework === "nextjs") {
+        pkg.dependencies = pkg.dependencies ?? {};
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.scripts = pkg.scripts ?? {};
+        pkg.scripts.build = pkg.scripts.build ?? "next build";
+        pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";
+        pkg.scripts.deploy = "opennextjs-cloudflare build && opennextjs-cloudflare deploy";
+        pkg.scripts.upload = "opennextjs-cloudflare build && opennextjs-cloudflare upload";
+      }
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+    }),
+    await wranglerChange(ctx, "Bind a SQLite-backed Durable Object", (config) => {
+      configureOpenNextMainIfNeeded(ctx, config);
+      const durableObjects = asObject(config.durable_objects);
+      durableObjects.bindings = upsertArrayObject(durableObjects.bindings, "name", {
+        name: binding,
+        class_name: className
+      });
+      config.durable_objects = durableObjects;
+      config.migrations = upsertDurableObjectMigration(config.migrations, `v1-${objectName}`, className);
+    }),
+    await fileChange(ctx, sourcePath, durableObjectClass(className), "Add Durable Object class"),
+    await appendEnvType(ctx, `${binding}: DurableObjectNamespace;`, "Add Durable Object binding type"),
+    await fileChange(ctx, "docs/flarecel-durable-object.md", durableObjectDoc(objectName, binding, className, routePath), "Explain Durable Object recipe")
+  ];
+
+  if (ctx.framework === "nextjs") {
+    changes.push(
+      await customOpenNextWorkerChange(ctx, [
+        { exportName: className, sourcePath }
+      ], "Export Durable Object class from a custom OpenNext worker"),
+      await fileChange(ctx, routePath, durableObjectRoute(routePath, binding), "Add Next.js route handler for Durable Object RPC")
+    );
+  }
+
+  return {
+    status: "planned",
+    title: `Add Durable Object: ${objectName}`,
+    changes: changes.filter((change) => change.before !== change.after),
+    warnings: [
+      "Durable Object namespaces are created by Wrangler deploy through migrations; do not remove migration tags after deploying.",
+      "For OpenNext, Flarecel switches Wrangler main to cloudflare-worker.ts so the Durable Object class is exported with the generated Next fetch handler."
+    ],
+    nextActions: [
+      "npm install",
+      "npm run cf-typegen",
+      "flarecel verify --json",
+      "npm run preview"
+    ]
+  };
+}
+
+async function workflowRecipe(ctx: ProjectContext, workflowNameInput: string, options: RecipeOptions): Promise<ChangeSet> {
+  const workflowSlug = sanitizeFeatureName(workflowNameInput);
+  const workflowName = `${projectName(ctx)}-${workflowSlug}`;
+  const binding = `${workflowSlug.toUpperCase().replace(/-/g, "_")}_WORKFLOW`;
+  const className = `${pascalCase(workflowSlug)}Workflow`;
+  const sourcePath = `src/cloudflare/workflows/${workflowSlug}.ts`;
+  const routePath = nextRoutePath(ctx, `workflows/${workflowSlug}`);
+  const schedule = typeof options.flags.schedule === "string" ? options.flags.schedule : null;
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workflows support", (pkg) => {
+      if (ctx.framework === "nextjs") {
+        pkg.dependencies = pkg.dependencies ?? {};
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.scripts = pkg.scripts ?? {};
+        pkg.scripts.build = pkg.scripts.build ?? "next build";
+        pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";
+        pkg.scripts.deploy = "opennextjs-cloudflare build && opennextjs-cloudflare deploy";
+        pkg.scripts.upload = "opennextjs-cloudflare build && opennextjs-cloudflare upload";
+      }
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+      pkg.scripts["workflows:list"] = `wrangler workflows instances list ${workflowName}`;
+    }),
+    await wranglerChange(ctx, "Bind a Cloudflare Workflow", (config) => {
+      configureOpenNextMainIfNeeded(ctx, config);
+      const workflowConfig: JsonObject = {
+        name: workflowName,
+        binding,
+        class_name: className
+      };
+      if (schedule) workflowConfig.schedules = [schedule];
+      config.workflows = upsertArrayObject(config.workflows, "binding", workflowConfig);
+      config.observability = {
+        ...asObject(config.observability),
+        enabled: true
+      };
+    }),
+    await fileChange(ctx, sourcePath, workflowClass(className), "Add Workflow class"),
+    await appendEnvType(ctx, `${binding}: Workflow;`, "Add Workflow binding type"),
+    await fileChange(ctx, "docs/flarecel-workflow.md", workflowDoc(workflowName, workflowSlug, binding, className, routePath, schedule), "Explain Workflow recipe")
+  ];
+
+  if (ctx.framework === "nextjs") {
+    changes.push(
+      await customOpenNextWorkerChange(ctx, [
+        { exportName: className, sourcePath }
+      ], "Export Workflow class from a custom OpenNext worker"),
+      await fileChange(ctx, routePath, workflowRoute(routePath, binding), "Add Next.js route handler for Workflow instances")
+    );
+  }
+
+  return {
+    status: "planned",
+    title: `Add Cloudflare Workflow: ${workflowSlug}`,
+    changes: changes.filter((change) => change.before !== change.after),
+    warnings: [
+      "Workflow state retention and storage can become billable. Estimate usage before production.",
+      "For OpenNext, Flarecel switches Wrangler main to cloudflare-worker.ts so the Workflow class is exported with the generated Next fetch handler."
+    ],
+    nextActions: [
+      "npm install",
+      "npm run cf-typegen",
+      "flarecel verify --json",
+      "npm run preview"
+    ]
+  };
+}
+
+async function browserRunRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  const binding = "BROWSER";
+  const routePath = nextRoutePath(ctx, "browser/screenshot");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Browser Run support", (pkg) => {
+      pkg.dependencies = pkg.dependencies ?? {};
+      if (ctx.framework === "nextjs") {
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+      }
+      pkg.dependencies["@cloudflare/puppeteer"] = pkg.dependencies["@cloudflare/puppeteer"] ?? "latest";
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.scripts = pkg.scripts ?? {};
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+    }),
+    await wranglerChange(ctx, "Bind Cloudflare Browser Run", (config) => {
+      config.browser = { binding };
+      config.compatibility_flags = addUniqueStrings(config.compatibility_flags, ["nodejs_compat"]);
+    }),
+    await fileChange(ctx, "src/cloudflare/browser-run.ts", browserRunHelper(binding), "Add Browser Run screenshot helper"),
+    await appendEnvType(ctx, `${binding}: Fetcher;`, "Add Browser Run binding type"),
+    await fileChange(ctx, "docs/flarecel-browser-run.md", browserRunDoc(binding, routePath), "Explain Browser Run recipe")
+  ];
+
+  if (ctx.framework === "nextjs") {
+    changes.push(await fileChange(ctx, routePath, browserRunRoute(routePath), "Add Next.js route handler for Browser Run screenshots"));
+  }
+
+  return {
+    status: "planned",
+    title: "Add Cloudflare Browser Run",
+    changes: changes.filter((change) => change.before !== change.after),
+    warnings: [
+      "Browser Run is billable by browser time and, for sessions, averaged concurrency. Put auth/rate limiting in front of public routes.",
+      "Use this for screenshots, PDFs, rendered crawling, and agent browser tasks instead of bundling normal Puppeteer."
+    ],
+    nextActions: [
+      "npm install",
+      "npm run cf-typegen",
+      "flarecel cost --browser-run-hours 10 --json",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function queueRecipe(ctx: ProjectContext, queueNameInput: string): Promise<ChangeSet> {
+  const queueName = `${projectName(ctx)}-${sanitizeQueueName(queueNameInput)}`;
+  const binding = `${sanitizeQueueName(queueNameInput).toUpperCase().replace(/-/g, "_")}_QUEUE`;
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Cloudflare Workers types for Queues", (pkg) => {
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+    }),
+    await wranglerChange(ctx, "Add Cloudflare Queue producer config", (config) => {
+      const queues = asObject(config.queues);
+      queues.producers = upsertArrayObject(queues.producers, "binding", {
+        queue: queueName,
+        binding
+      });
+      config.queues = queues;
+    }),
+    await fileChange(ctx, `src/cloudflare/queues/${sanitizeQueueName(queueNameInput)}.ts`, queueHelper(binding), "Add Queue producer helper"),
+    await appendEnvType(ctx, `${binding}: Queue;`, "Add Queue binding type"),
+    await fileChange(ctx, `docs/flarecel-queue-${sanitizeQueueName(queueNameInput)}.md`, queueDoc(binding, queueName), "Explain Queue recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: `Add Cloudflare Queue: ${queueNameInput}`,
+    changes,
+    warnings: [
+      "Flarecel updates config and code, but it does not create the remote queue yet.",
+      "This MVP adds a Queue producer binding only. Queue consumers for OpenNext apps need a custom Worker or separate consumer Worker."
+    ],
+    nextActions: [
+      `wrangler queues create ${queueName}`,
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function betterAuthRecipe(ctx: ProjectContext, options: RecipeOptions): Promise<ChangeSet> {
+  const db = String(options.flags.db ?? "d1");
+  const orm = String(options.flags.orm ?? "drizzle");
+
+  if (db === "d1" && orm === "drizzle") {
+    return betterAuthD1DrizzleRecipe(ctx);
+  }
+
+  const changes = [
+    await fileChange(
+      ctx,
+      "docs/flarecel-better-auth.md",
+      betterAuthDoc(db, orm),
+      "Create Better Auth implementation checklist"
+    )
+  ];
+
+  return {
+    status: "planned",
+    title: "Plan Better Auth recipe",
+    changes,
+    warnings: [
+      "The Better Auth recipe is a documented placeholder in this MVP; code generation comes after the Next/R2/Rate Limit/Queue loop is proven."
+    ],
+    nextActions: [
+      "Review docs/flarecel-better-auth.md",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+async function betterAuthD1DrizzleRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  const databaseName = `${projectName(ctx)}-auth`;
+  const binding = "DB";
+  const routePath = nextRoutePath(ctx, "auth/[...all]");
+  const authFile = nextLibPath(ctx, "auth.ts");
+  const authClientFile = nextLibPath(ctx, "auth-client.ts");
+  const schemaFile = nextDbPath(ctx, "schema.ts");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Better Auth, Drizzle, D1, and OpenNext dependencies/scripts", (pkg) => {
+      pkg.dependencies = pkg.dependencies ?? {};
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.scripts = pkg.scripts ?? {};
+
+      pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+      pkg.dependencies["better-auth"] = pkg.dependencies["better-auth"] ?? "latest";
+      pkg.dependencies["drizzle-orm"] = pkg.dependencies["drizzle-orm"] ?? "latest";
+
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies["drizzle-kit"] = pkg.devDependencies["drizzle-kit"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+
+      pkg.scripts.build = pkg.scripts.build ?? "next build";
+      pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";
+      pkg.scripts.deploy = "opennextjs-cloudflare build && opennextjs-cloudflare deploy";
+      pkg.scripts.upload = "opennextjs-cloudflare build && opennextjs-cloudflare upload";
+      pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
+      pkg.scripts["auth:generate"] = "npx auth@latest generate";
+      pkg.scripts["db:generate"] = "drizzle-kit generate";
+      pkg.scripts["db:migrate:local"] = `wrangler d1 migrations apply ${databaseName} --local`;
+      pkg.scripts["db:migrate:remote"] = `wrangler d1 migrations apply ${databaseName} --remote`;
+    }),
+    await wranglerChange(ctx, "Bind a D1 database for Better Auth", (config) => {
+      config.$schema = config.$schema ?? "node_modules/wrangler/config-schema.json";
+      config.name = config.name ?? projectName(ctx);
+      if (ctx.framework === "nextjs") {
+        config.main = ".open-next/worker.js";
+        config.assets = {
+          directory: ".open-next/assets",
+          binding: "ASSETS"
+        };
+        config.services = upsertArrayObject(config.services, "binding", {
+          binding: "WORKER_SELF_REFERENCE",
+          service: String(config.name)
+        });
+      }
+      config.compatibility_date = config.compatibility_date ?? today();
+      config.compatibility_flags = addUniqueStrings(config.compatibility_flags, [
+        "nodejs_compat",
+        "global_fetch_strictly_public"
+      ]);
+      config.d1_databases = upsertArrayObject(config.d1_databases, "binding", {
+        binding,
+        database_name: databaseName,
+        database_id: "replace-with-d1-database-id",
+        migrations_dir: "drizzle"
+      });
+    }),
+    await fileChange(ctx, authFile, betterAuthFactory(schemaFile), "Add Better Auth factory for D1/Drizzle"),
+    await fileChange(ctx, authClientFile, betterAuthClient(), "Add Better Auth React client"),
+    await fileChange(ctx, routePath, betterAuthRoute(routePath, authFile), "Add Better Auth route handler"),
+    await fileChange(ctx, schemaFile, betterAuthDrizzleSchema(), "Add Better Auth Drizzle schema for SQLite/D1"),
+    await fileChange(ctx, "drizzle.config.ts", drizzleConfig(schemaFile), "Add Drizzle migration config"),
+    await appendLinesChange(ctx, ".gitignore", [".wrangler", "cloudflare-env.d.ts"], "Ignore local Wrangler state and generated binding types"),
+    await appendLinesChange(ctx, ".dev.vars.example", [
+      "BETTER_AUTH_URL=http://localhost:3000",
+      "BETTER_AUTH_SECRET=replace-with-a-32-byte-secret"
+    ], "Document local Better Auth environment values"),
+    await appendEnvTypes(ctx, [
+      "DB: D1Database;",
+      "BETTER_AUTH_SECRET: string;",
+      "BETTER_AUTH_URL?: string;"
+    ], "Add Better Auth and D1 binding types"),
+    await fileChange(ctx, "docs/flarecel-better-auth-d1-drizzle.md", betterAuthD1DrizzleDoc(databaseName, binding), "Explain Better Auth + D1 + Drizzle recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add Better Auth with D1 and Drizzle",
+    changes,
+    warnings: [
+      "This recipe generates app code/config but does not create the remote D1 database.",
+      "Do not commit real BETTER_AUTH_SECRET values. Use Wrangler secrets for production.",
+      "Run the generated migration flow before relying on auth in preview or production."
+    ],
+    nextActions: [
+      `wrangler d1 create ${databaseName}`,
+      "Copy the returned database_id into wrangler.jsonc.",
+      "openssl rand -base64 32",
+      "wrangler secret put BETTER_AUTH_SECRET",
+      "npm install",
+      "npm run db:generate",
+      "npm run db:migrate:local",
+      "npm run cf-typegen",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+function shouldPatchOpenNext(report: DoctorReport): boolean {
+  const patchableIds = new Set([
+    "missing-opennext",
+    "missing-wrangler-config",
+    "missing-nodejs-compat",
+    "missing-global-fetch-strictly-public"
+  ]);
+  return report.issues.some((candidate) => patchableIds.has(candidate.id));
+}
+
+async function packageJsonChange(
+  ctx: ProjectContext,
+  reason: string,
+  mutate: (pkg: PackageJson) => void
+): Promise<PlannedChange> {
+  const before = ctx.packageJsonRaw;
+  const pkg = before ? (JSON.parse(before) as PackageJson) : ({ scripts: {} } as PackageJson);
+  mutate(pkg);
+
+  return {
+    path: "package.json",
+    before,
+    after: `${JSON.stringify(pkg, null, 2)}\n`,
+    reason
+  };
+}
+
+async function wranglerChange(
+  ctx: ProjectContext,
+  reason: string,
+  mutate: (config: JsonObject) => void
+): Promise<PlannedChange> {
+  if (ctx.wrangler.format === "toml") {
+    const generated = baseWrangler(ctx);
+    mutate(generated);
+
+    return {
+      path: "wrangler.jsonc",
+      before: null,
+      after: JSON.stringify(generated, null, 2) + "\n",
+      reason: `${reason}. Existing TOML was not modified; this JSONC file is generated for review.`
+    };
+  }
+
+  const before = ctx.wrangler.rawText;
+  const config = ctx.wrangler.data
+    ? structuredClone(ctx.wrangler.data)
+    : baseWrangler(ctx);
+
+  mutate(config);
+
+  return {
+    path: ctx.wrangler.path ? path.basename(ctx.wrangler.path) : "wrangler.jsonc",
+    before,
+    after: `${JSON.stringify(config, null, 2)}\n`,
+    reason
+  };
+}
+
+function configureOpenNextMainIfNeeded(ctx: ProjectContext, config: JsonObject): void {
+  config.$schema = config.$schema ?? "node_modules/wrangler/config-schema.json";
+  config.name = config.name ?? projectName(ctx);
+  config.compatibility_date = config.compatibility_date ?? today();
+
+  if (ctx.framework !== "nextjs") return;
+
+  config.main = "cloudflare-worker.ts";
+  config.compatibility_flags = addUniqueStrings(config.compatibility_flags, [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ]);
+  config.assets = {
+    directory: ".open-next/assets",
+    binding: "ASSETS"
+  };
+  config.services = upsertArrayObject(config.services, "binding", {
+    binding: "WORKER_SELF_REFERENCE",
+    service: String(config.name)
+  });
+}
+
+async function customOpenNextWorkerChange(
+  ctx: ProjectContext,
+  exportsToAdd: Array<{ exportName: string; sourcePath: string }>,
+  reason: string
+): Promise<PlannedChange> {
+  const relativePath = "cloudflare-worker.ts";
+  const before = await readFileIfExists(path.join(ctx.cwd, relativePath));
+  const exportLines = exportsToAdd.map((item) => {
+    const source = `./${item.sourcePath.replace(/\.ts$/, "")}`;
+    return `export { ${item.exportName} } from "${source}";`;
+  });
+
+  if (!before) {
+    return {
+      path: relativePath,
+      before,
+      after: customOpenNextWorker(exportLines),
+      reason
+    };
+  }
+
+  const missing = exportLines.filter((line) => !before.includes(line));
+  if (missing.length === 0) {
+    return {
+      path: relativePath,
+      before,
+      after: before,
+      reason
+    };
+  }
+
+  return {
+    path: relativePath,
+    before,
+    after: `${before.replace(/\n?$/, "\n")}${missing.join("\n")}\n`,
+    reason
+  };
+}
+
+function customOpenNextWorker(exportLines: string[]): string {
+  return `// @ts-ignore .open-next/worker.js is generated by @opennextjs/cloudflare at build time.
+import { default as handler } from "./.open-next/worker.js";
+
+export default {
+  fetch: handler.fetch
+} satisfies ExportedHandler<CloudflareEnv>;
+
+${exportLines.join("\n")}
+`;
+}
+
+async function fileChange(ctx: ProjectContext, relativePath: string, content: string, reason: string): Promise<PlannedChange> {
+  const before = await readFileIfExists(path.join(ctx.cwd, relativePath));
+  return {
+    path: relativePath,
+    before,
+    after: content.endsWith("\n") ? content : `${content}\n`,
+    reason
+  };
+}
+
+async function appendLineChange(ctx: ProjectContext, relativePath: string, line: string, reason: string): Promise<PlannedChange> {
+  return appendLinesChange(ctx, relativePath, [line], reason);
+}
+
+async function appendLinesChange(ctx: ProjectContext, relativePath: string, linesToAppend: string[], reason: string): Promise<PlannedChange> {
+  const before = await readFileIfExists(path.join(ctx.cwd, relativePath));
+  const lines = before ? before.split(/\r?\n/) : [];
+  const missing = linesToAppend.filter((line) => !lines.includes(line));
+
+  if (missing.length === 0) {
+    return {
+      path: relativePath,
+      before,
+      after: before ?? "",
+      reason
+    };
+  }
+
+  const after = `${before ? before.replace(/\n?$/, "\n") : ""}${missing.join("\n")}\n`;
+  return {
+    path: relativePath,
+    before,
+    after,
+    reason
+  };
+}
+
+async function appendEnvType(ctx: ProjectContext, declaration: string, reason: string): Promise<PlannedChange> {
+  return appendEnvTypes(ctx, [declaration], reason);
+}
+
+async function appendEnvTypes(ctx: ProjectContext, declarations: string[], reason: string): Promise<PlannedChange> {
+  const relativePath = "cloudflare-env.d.ts";
+  const before = await readFileIfExists(path.join(ctx.cwd, relativePath));
+  const header = "/// <reference types=\"@cloudflare/workers-types\" />\n\ninterface CloudflareEnv {\n";
+  const footer = "}\n";
+  const missing = declarations.filter((declaration) => !before?.includes(declaration));
+
+  if (!before) {
+    return {
+      path: relativePath,
+      before,
+      after: `${header}${declarations.map((declaration) => `  ${declaration}`).join("\n")}\n${footer}`,
+      reason
+    };
+  }
+
+  if (missing.length === 0) {
+    return {
+      path: relativePath,
+      before,
+      after: before,
+      reason
+    };
+  }
+
+  const after = before.includes("interface CloudflareEnv")
+    ? before.replace(/interface CloudflareEnv\s*\{\n/, (match) => `${match}${missing.map((declaration) => `  ${declaration}`).join("\n")}\n`)
+    : `${before.replace(/\n?$/, "\n")}\n${header}${missing.map((declaration) => `  ${declaration}`).join("\n")}\n${footer}`;
+
+  return {
+    path: relativePath,
+    before,
+    after,
+    reason
+  };
+}
+
+async function ensureHeadersChange(ctx: ProjectContext): Promise<PlannedChange> {
+  const relativePath = "public/_headers";
+  const before = await readFileIfExists(path.join(ctx.cwd, relativePath));
+  const block = "/_next/static/*\n  Cache-Control: public,max-age=31536000,immutable";
+
+  if (before?.includes("/_next/static/*")) {
+    return {
+      path: relativePath,
+      before,
+      after: before,
+      reason: "Ensure static asset caching headers"
+    };
+  }
+
+  return {
+    path: relativePath,
+    before,
+    after: `${before ? `${before.replace(/\n?$/, "\n")}\n` : ""}${block}\n`,
+    reason: "Ensure static asset caching headers"
+  };
+}
+
+function baseWrangler(ctx: ProjectContext): JsonObject {
+  const config: JsonObject = {
+    $schema: "node_modules/wrangler/config-schema.json",
+    name: projectName(ctx),
+    main: ctx.framework === "nextjs" ? ".open-next/worker.js" : "src/index.ts",
+    compatibility_date: today(),
+    compatibility_flags: ctx.framework === "nextjs"
+      ? ["nodejs_compat", "global_fetch_strictly_public"]
+      : []
+  };
+
+  if (ctx.framework === "nextjs") {
+    config.assets = {
+      directory: ".open-next/assets",
+      binding: "ASSETS"
+    };
+    config.services = [
+      {
+        binding: "WORKER_SELF_REFERENCE",
+        service: projectName(ctx)
+      }
+    ];
+  }
+
+  return config;
+}
+
+function openNextConfig(): string {
+  return `import { defineCloudflareConfig } from "@opennextjs/cloudflare";
+
+export default defineCloudflareConfig({});
+`;
+}
+
+function r2UploadRoute(binding: string): string {
+  return `import { getCloudflareContext } from "@opennextjs/cloudflare";
+
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+type UploadEnv = {
+  ${binding}: R2Bucket;
+};
+
+export async function PUT(request: Request) {
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (contentLength > MAX_UPLOAD_BYTES) {
+    return Response.json({ error: "File is too large." }, { status: 413 });
+  }
+
+  if (!request.body) {
+    return Response.json({ error: "Missing request body." }, { status: 400 });
+  }
+
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key") ?? crypto.randomUUID();
+  const contentType = request.headers.get("content-type") ?? undefined;
+  const { env } = await getCloudflareContext();
+
+  await (env as UploadEnv).${binding}.put(key, request.body, {
+    httpMetadata: contentType ? { contentType } : undefined
+  });
+
+  return Response.json({ key });
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key");
+  if (!key) {
+    return Response.json({ error: "Missing key." }, { status: 400 });
+  }
+
+  const { env } = await getCloudflareContext();
+  const object = await (env as UploadEnv).${binding}.get(key);
+  if (!object) {
+    return Response.json({ error: "Not found." }, { status: 404 });
+  }
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+
+  return new Response(object.body, { headers });
+}
+`;
+}
+
+function rateLimitHelper(binding: string): string {
+  return `type RateLimitEnv = {
+  ${binding}: RateLimit;
+};
+
+export async function enforceRateLimit(
+  env: RateLimitEnv,
+  key: string,
+  message = "Rate limit exceeded."
+): Promise<Response | null> {
+  const result = await env.${binding}.limit({ key });
+
+  if (!result.success) {
+    return Response.json({ error: message }, { status: 429 });
+  }
+
+  return null;
+}
+`;
+}
+
+function betterAuthFactory(schemaFile: string): string {
+  const schemaImport = relativeImport(nextLibPathFromSchema(schemaFile), schemaFile);
+
+  return `import { betterAuth } from "better-auth";
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { nextCookies } from "better-auth/next-js";
+import { drizzle } from "drizzle-orm/d1";
+import * as schema from "${schemaImport}";
+
+export interface AuthEnv {
+  DB: D1Database;
+  BETTER_AUTH_SECRET: string;
+  BETTER_AUTH_URL?: string;
+}
+
+export function createAuth(env: AuthEnv) {
+  const db = drizzle(env.DB, { schema });
+
+  return betterAuth({
+    database: drizzleAdapter(db, {
+      provider: "sqlite",
+      schema
+    }),
+    secret: env.BETTER_AUTH_SECRET,
+    baseURL: env.BETTER_AUTH_URL,
+    emailAndPassword: {
+      enabled: true
+    },
+    plugins: [
+      nextCookies()
+    ]
+  });
+}
+
+export type Auth = ReturnType<typeof createAuth>;
+`;
+}
+
+function betterAuthClient(): string {
+  return `import { createAuthClient } from "better-auth/react";
+
+export const authClient = createAuthClient();
+`;
+}
+
+function betterAuthRoute(routePath: string, authFile: string): string {
+  const authImport = relativeImport(routePath, authFile);
+
+  return `import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { createAuth, type AuthEnv } from "${authImport}";
+
+function authForRequest() {
+  const { env } = getCloudflareContext();
+  return createAuth(env as AuthEnv);
+}
+
+export async function GET(request: Request) {
+  return authForRequest().handler(request);
+}
+
+export async function POST(request: Request) {
+  return authForRequest().handler(request);
+}
+`;
+}
+
+function betterAuthDrizzleSchema(): string {
+  return `import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const user = sqliteTable("user", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  emailVerified: integer("emailVerified", { mode: "boolean" }).notNull().default(false),
+  image: text("image"),
+  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull()
+});
+
+export const session = sqliteTable("session", {
+  id: text("id").primaryKey(),
+  expiresAt: integer("expiresAt", { mode: "timestamp" }).notNull(),
+  token: text("token").notNull().unique(),
+  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
+  ipAddress: text("ipAddress"),
+  userAgent: text("userAgent"),
+  userId: text("userId").notNull().references(() => user.id, { onDelete: "cascade" })
+});
+
+export const account = sqliteTable("account", {
+  id: text("id").primaryKey(),
+  accountId: text("accountId").notNull(),
+  providerId: text("providerId").notNull(),
+  userId: text("userId").notNull().references(() => user.id, { onDelete: "cascade" }),
+  accessToken: text("accessToken"),
+  refreshToken: text("refreshToken"),
+  idToken: text("idToken"),
+  accessTokenExpiresAt: integer("accessTokenExpiresAt", { mode: "timestamp" }),
+  refreshTokenExpiresAt: integer("refreshTokenExpiresAt", { mode: "timestamp" }),
+  scope: text("scope"),
+  password: text("password"),
+  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull()
+});
+
+export const verification = sqliteTable("verification", {
+  id: text("id").primaryKey(),
+  identifier: text("identifier").notNull(),
+  value: text("value").notNull(),
+  expiresAt: integer("expiresAt", { mode: "timestamp" }).notNull(),
+  createdAt: integer("createdAt", { mode: "timestamp" }),
+  updatedAt: integer("updatedAt", { mode: "timestamp" })
+});
+`;
+}
+
+function drizzleConfig(schemaFile: string): string {
+  return `import { defineConfig } from "drizzle-kit";
+
+export default defineConfig({
+  schema: "./${schemaFile}",
+  out: "./drizzle",
+  dialect: "sqlite"
+});
+`;
+}
+
+function d1DrizzleSchema(): string {
+  return `import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const exampleItems = sqliteTable("example_items", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  completed: integer("completed", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull()
+});
+`;
+}
+
+function d1DrizzleHelper(dbFile: string, schemaFile: string): string {
+  const schemaImport = relativeImport(dbFile, schemaFile);
+
+  return `import { drizzle } from "drizzle-orm/d1";
+import * as schema from "${schemaImport}";
+
+export interface DbEnv {
+  DB: D1Database;
+}
+
+export function createDb(env: DbEnv) {
+  return drizzle(env.DB, { schema });
+}
+
+export type AppDb = ReturnType<typeof createDb>;
+`;
+}
+
+function kvCacheHelper(binding: string): string {
+  return `type CacheEnv = {
+  ${binding}: KVNamespace;
+};
+
+export async function getCachedJson<T>(env: CacheEnv, key: string): Promise<T | null> {
+  return await env.${binding}.get<T>(key, "json");
+}
+
+export async function putCachedJson(
+  env: CacheEnv,
+  key: string,
+  value: unknown,
+  ttlSeconds = 300
+): Promise<void> {
+  await env.${binding}.put(key, JSON.stringify(value), {
+    expirationTtl: ttlSeconds
+  });
+}
+
+export async function deleteCached(env: CacheEnv, key: string): Promise<void> {
+  await env.${binding}.delete(key);
+}
+`;
+}
+
+function turnstileHelper(): string {
+  return `export interface TurnstileEnv {
+  TURNSTILE_SECRET_KEY: string;
+}
+
+export interface TurnstileResult {
+  success: boolean;
+  challenge_ts?: string;
+  hostname?: string;
+  "error-codes"?: string[];
+  action?: string;
+  cdata?: string;
+}
+
+export async function validateTurnstile(
+  env: TurnstileEnv,
+  token: string,
+  remoteIp?: string
+): Promise<TurnstileResult> {
+  const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      secret: env.TURNSTILE_SECRET_KEY,
+      response: token,
+      remoteip: remoteIp,
+      idempotency_key: crypto.randomUUID()
+    })
+  });
+
+  return await response.json<TurnstileResult>();
+}
+`;
+}
+
+function turnstileRoute(routePath: string): string {
+  const helperImport = relativeImport(routePath, "src/cloudflare/turnstile.ts");
+
+  return `import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { validateTurnstile, type TurnstileEnv } from "${helperImport}";
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null) as { token?: unknown } | null;
+  const token = body?.token;
+
+  if (typeof token !== "string" || token.length === 0) {
+    return Response.json({ error: "Missing Turnstile token." }, { status: 400 });
+  }
+
+  const { env } = getCloudflareContext();
+  const remoteIp = request.headers.get("CF-Connecting-IP") ?? undefined;
+  const result = await validateTurnstile(env as TurnstileEnv, token, remoteIp);
+
+  if (!result.success) {
+    return Response.json({
+      error: "Turnstile verification failed.",
+      codes: result["error-codes"] ?? []
+    }, { status: 400 });
+  }
+
+  return Response.json({ ok: true });
+}
+`;
+}
+
+function cronHelper(cronName: string): string {
+  const functionName = `run${pascalCase(cronName)}`;
+
+  return `export interface CronJobContext {
+  cron: string;
+  scheduledTime: number;
+}
+
+export async function ${functionName}(ctx: CronJobContext): Promise<void> {
+  console.log("Running scheduled job", {
+    job: "${cronName}",
+    cron: ctx.cron,
+    scheduledTime: ctx.scheduledTime
+  });
+
+  // Add the real job work here.
+}
+`;
+}
+
+function workersAiHelper(defaultModel: string): string {
+  return `export interface WorkersAiEnv {
+  AI: Ai;
+}
+
+export interface WorkersAiTextResult {
+  response?: string;
+  [key: string]: unknown;
+}
+
+export async function runWorkersAiText(
+  env: WorkersAiEnv,
+  prompt: string,
+  model = "${defaultModel}"
+): Promise<WorkersAiTextResult> {
+  return await env.AI.run(model, { prompt }) as WorkersAiTextResult;
+}
+`;
+}
+
+function workersAiRoute(routePath: string): string {
+  const helperImport = relativeImport(routePath, "src/cloudflare/workers-ai.ts");
+
+  return `import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { runWorkersAiText, type WorkersAiEnv } from "${helperImport}";
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null) as { prompt?: unknown; model?: unknown } | null;
+  const prompt = body?.prompt;
+
+  if (typeof prompt !== "string" || prompt.length === 0) {
+    return Response.json({ error: "Missing prompt." }, { status: 400 });
+  }
+
+  const { env } = getCloudflareContext();
+  const model = typeof body?.model === "string" ? body.model : undefined;
+  const result = await runWorkersAiText(env as WorkersAiEnv, prompt, model);
+
+  return Response.json(result);
+}
+`;
+}
+
+function vectorizeHelper(binding: string): string {
+  return `type VectorizeEnv = {
+  ${binding}: VectorizeIndex;
+};
+
+export interface VectorizeMetadata {
+  [key: string]: string | number | boolean | string[] | null;
+}
+
+export async function upsertVector(
+  env: VectorizeEnv,
+  id: string,
+  values: number[],
+  metadata: VectorizeMetadata = {}
+): Promise<void> {
+  await env.${binding}.upsert([
+    {
+      id,
+      values,
+      metadata
+    }
+  ]);
+}
+
+export async function queryVectorize(
+  env: VectorizeEnv,
+  values: number[],
+  topK = 5
+) {
+  return await env.${binding}.query(values, {
+    topK,
+    returnMetadata: "all"
+  });
+}
+`;
+}
+
+function vectorizeResourceMetadata(indexName: string, dimensions: number, metric: string): string {
+  return `${JSON.stringify({
+    version: 1,
+    resources: {
+      vectorize: [
+        {
+          index_name: indexName,
+          dimensions,
+          metric
+        }
+      ]
+    }
+  }, null, 2)}\n`;
+}
+
+function aiGatewayHelper(provider: string): string {
+  return `export interface AiGatewayEnv {
+  CLOUDFLARE_ACCOUNT_ID: string;
+  AI_GATEWAY_ID: string;
+  OPENAI_API_KEY?: string;
+  CF_AIG_TOKEN?: string;
+}
+
+export function aiGatewayBaseUrl(env: AiGatewayEnv, provider = "${provider}") {
+  return \`https://gateway.ai.cloudflare.com/v1/\${env.CLOUDFLARE_ACCOUNT_ID}/\${env.AI_GATEWAY_ID}/\${provider}\`;
+}
+
+export async function callAiGateway(
+  env: AiGatewayEnv,
+  path: string,
+  body: unknown,
+  provider = "${provider}"
+): Promise<unknown> {
+  const headers = new Headers({
+    "Content-Type": "application/json"
+  });
+
+  if (env.OPENAI_API_KEY) headers.set("Authorization", \`Bearer \${env.OPENAI_API_KEY}\`);
+  if (env.CF_AIG_TOKEN) headers.set("cf-aig-authorization", \`Bearer \${env.CF_AIG_TOKEN}\`);
+
+  const response = await fetch(\`\${aiGatewayBaseUrl(env, provider)}\${path}\`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    throw new Error(\`AI Gateway request failed: \${response.status} \${await response.text()}\`);
+  }
+
+  return await response.json();
+}
+`;
+}
+
+function observabilityHelper(): string {
+  return `export function requestId(request: Request): string {
+  return request.headers.get("cf-ray")
+    ?? request.headers.get("x-request-id")
+    ?? crypto.randomUUID();
+}
+
+export function logRequestEvent(
+  request: Request,
+  event: string,
+  fields: Record<string, unknown> = {}
+): void {
+  console.log(JSON.stringify({
+    event,
+    requestId: requestId(request),
+    method: request.method,
+    url: request.url,
+    ...fields
+  }));
+}
+`;
+}
+
+function durableObjectClass(className: string): string {
+  return `import { DurableObject } from "cloudflare:workers";
+
+export class ${className} extends DurableObject<CloudflareEnv> {
+  constructor(ctx: DurableObjectState, env: CloudflareEnv) {
+    super(ctx, env);
+  }
+
+  async increment(key = "default"): Promise<{ key: string; value: number }> {
+    const current = await this.ctx.storage.get<number>(key) ?? 0;
+    const value = current + 1;
+    await this.ctx.storage.put(key, value);
+    return { key, value };
+  }
+
+  async getValue(key = "default"): Promise<{ key: string; value: number }> {
+    const value = await this.ctx.storage.get<number>(key) ?? 0;
+    return { key, value };
+  }
+}
+`;
+}
+
+function durableObjectRoute(routePath: string, binding: string): string {
+  const helperType = `${binding}: DurableObjectNamespace;`;
+
+  return `import { getCloudflareContext } from "@opennextjs/cloudflare";
+
+type DurableObjectEnv = {
+  ${helperType}
+};
+
+type CounterStub = DurableObjectStub & {
+  increment(key?: string): Promise<{ key: string; value: number }>;
+  getValue(key?: string): Promise<{ key: string; value: number }>;
+};
+
+function counterStub(env: DurableObjectEnv, name: string): CounterStub {
+  const id = env.${binding}.idFromName(name);
+  return env.${binding}.get(id) as CounterStub;
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const name = url.searchParams.get("name") ?? "demo";
+  const key = url.searchParams.get("key") ?? "default";
+  const { env } = getCloudflareContext();
+  const result = await counterStub(env as DurableObjectEnv, name).getValue(key);
+
+  return Response.json(result);
+}
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null) as { name?: unknown; key?: unknown } | null;
+  const name = typeof body?.name === "string" && body.name.length > 0 ? body.name : "demo";
+  const key = typeof body?.key === "string" && body.key.length > 0 ? body.key : "default";
+  const { env } = getCloudflareContext();
+  const result = await counterStub(env as DurableObjectEnv, name).increment(key);
+
+  return Response.json(result);
+}
+`;
+}
+
+function workflowClass(className: string): string {
+  return `import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+
+export type ${className}Params = {
+  name?: string;
+  source?: string;
+};
+
+export class ${className} extends WorkflowEntrypoint<CloudflareEnv, ${className}Params> {
+  async run(event: WorkflowEvent<${className}Params>, step: WorkflowStep) {
+    const startedAt = await step.do("record start", async () => {
+      return new Date().toISOString();
+    });
+
+    await step.sleep("small durable pause", "5 seconds");
+
+    return await step.do("finish", async () => {
+      return {
+        message: \`Hello \${event.payload.name ?? "from Flarecel"}\`,
+        source: event.payload.source ?? "manual",
+        startedAt,
+        finishedAt: new Date().toISOString()
+      };
+    });
+  }
+}
+`;
+}
+
+function workflowRoute(routePath: string, binding: string): string {
+  return `import { getCloudflareContext } from "@opennextjs/cloudflare";
+
+type WorkflowEnv = {
+  ${binding}: Workflow;
+};
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const instanceId = url.searchParams.get("instanceId");
+
+  if (!instanceId) {
+    return Response.json({ error: "Missing instanceId." }, { status: 400 });
+  }
+
+  const { env } = getCloudflareContext();
+  const instance = await (env as WorkflowEnv).${binding}.get(instanceId);
+
+  return Response.json({
+    id: instance.id,
+    details: await instance.status()
+  });
+}
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+  const id = typeof body?.id === "string" && body.id.length > 0 ? body.id : undefined;
+  const params = body?.params && typeof body.params === "object" ? body.params : body ?? {};
+  const { env } = getCloudflareContext();
+  const instance = await (env as WorkflowEnv).${binding}.create({
+    id,
+    params
+  });
+
+  return Response.json({
+    id: instance.id,
+    details: await instance.status()
+  });
+}
+`;
+}
+
+function browserRunHelper(binding: string): string {
+  return `import puppeteer from "@cloudflare/puppeteer";
+
+export interface BrowserRunEnv {
+  ${binding}: Fetcher;
+}
+
+export interface ScreenshotOptions {
+  width?: number;
+  height?: number;
+  quality?: number;
+}
+
+export async function captureScreenshot(
+  env: BrowserRunEnv,
+  url: string,
+  options: ScreenshotOptions = {}
+): Promise<Uint8Array> {
+  const browser = await puppeteer.launch(env.${binding});
+
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({
+      width: options.width ?? 1200,
+      height: options.height ?? 630
+    });
+    await page.goto(url, {
+      waitUntil: "networkidle0"
+    });
+
+    return await page.screenshot({
+      type: "jpeg",
+      quality: options.quality ?? 80
+    }) as Uint8Array;
+  } finally {
+    await browser.close();
+  }
+}
+`;
+}
+
+function browserRunRoute(routePath: string): string {
+  const helperImport = relativeImport(routePath, "src/cloudflare/browser-run.ts");
+
+  return `import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { captureScreenshot, type BrowserRunEnv } from "${helperImport}";
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const target = url.searchParams.get("url");
+
+  if (!target) {
+    return Response.json({ error: "Missing url query parameter." }, { status: 400 });
+  }
+
+  let safeUrl: URL;
+  try {
+    safeUrl = new URL(target);
+  } catch {
+    return Response.json({ error: "Invalid url." }, { status: 400 });
+  }
+
+  if (!["http:", "https:"].includes(safeUrl.protocol)) {
+    return Response.json({ error: "Only http and https URLs are allowed." }, { status: 400 });
+  }
+
+  const { env } = getCloudflareContext();
+  const image = await captureScreenshot(env as BrowserRunEnv, safeUrl.toString());
+
+  return new Response(image, {
+    headers: {
+      "Content-Type": "image/jpeg",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+`;
+}
+
+function queueHelper(binding: string): string {
+  return `export interface QueueJob {
+  type: string;
+  payload: unknown;
+  createdAt: string;
+}
+
+type QueueEnv = {
+  ${binding}: Queue<QueueJob>;
+};
+
+export async function enqueueJob(env: QueueEnv, type: string, payload: unknown): Promise<void> {
+  await env.${binding}.send({
+    type,
+    payload,
+    createdAt: new Date().toISOString()
+  });
+}
+`;
+}
+
+function r2UploadsDoc(binding: string, bucket: string, routePath: string): string {
+  return `# Flarecel R2 Uploads
+
+This recipe adds Cloudflare R2 file storage.
+
+Binding: \`${binding}\`
+Bucket: \`${bucket}\`
+Route: \`${routePath}\`
+
+Create the remote bucket:
+
+\`\`\`bash
+wrangler r2 bucket create ${bucket}
+\`\`\`
+
+Then regenerate types:
+
+\`\`\`bash
+npm run cf-typegen
+\`\`\`
+
+The upload route accepts:
+
+\`\`\`bash
+curl -X PUT "http://localhost:8787/api/uploads?key=hello.txt" --data-binary @hello.txt
+\`\`\`
+`;
+}
+
+function rateLimitDoc(
+  binding: string,
+  route: string,
+  parsedLimit: { limit: number; period: 10 | 60 }
+): string {
+  return `# Flarecel Rate Limiting
+
+This recipe adds a Cloudflare Rate Limiting binding.
+
+Binding: \`${binding}\`
+Suggested route: \`${route}\`
+Limit: ${parsedLimit.limit} request(s) per ${parsedLimit.period} seconds
+
+Important:
+
+Cloudflare Rate Limiting is excellent for abuse protection, but counters are local to each Cloudflare location. Do not use it as an exact billing meter.
+`;
+}
+
+function d1DrizzleDoc(databaseName: string, binding: string, schemaFile: string): string {
+  return `# Flarecel D1 + Drizzle
+
+This recipe wires Cloudflare D1 to Drizzle.
+
+Binding: \`${binding}\`
+Database: \`${databaseName}\`
+Schema: \`${schemaFile}\`
+Migration directory: \`drizzle\`
+
+Create the remote D1 database:
+
+\`\`\`bash
+wrangler d1 create ${databaseName}
+\`\`\`
+
+Copy the returned \`database_id\` into \`wrangler.jsonc\`.
+
+Generate and apply migrations:
+
+\`\`\`bash
+npm run db:generate
+npm run db:migrate:local
+npm run db:migrate:remote
+\`\`\`
+
+Human explanation:
+
+D1 is Cloudflare's serverless SQL database. Drizzle gives your app typed database queries and migrations.
+`;
+}
+
+function kvCacheDoc(binding: string, namespaceName: string): string {
+  return `# Flarecel KV Cache
+
+This recipe adds Cloudflare Workers KV for cache-like data.
+
+Binding: \`${binding}\`
+Namespace: \`${namespaceName}\`
+
+Create the remote namespace:
+
+\`\`\`bash
+wrangler kv namespace create ${binding}
+\`\`\`
+
+Copy the returned \`id\` into \`wrangler.jsonc\`.
+
+Use KV for:
+
+- Config cache
+- Feature flags
+- Public page cache metadata
+- Low-write, high-read data
+
+Do not use KV for:
+
+- Strict counters
+- Transactions
+- Billing-critical state
+- Data that must be immediately consistent everywhere
+
+Human explanation:
+
+KV is a global key-value store. It is fast for reads, but eventually consistent.
+`;
+}
+
+function turnstileDoc(formName: string, routePath: string): string {
+  return `# Flarecel Turnstile
+
+This recipe adds Cloudflare Turnstile server-side token validation.
+
+Form: \`${formName}\`
+Verification route: \`${routePath}\`
+
+Create a Turnstile widget in the Cloudflare dashboard, then set:
+
+\`\`\`bash
+wrangler secret put TURNSTILE_SECRET_KEY
+\`\`\`
+
+Expose the site key to your frontend:
+
+\`\`\`bash
+NEXT_PUBLIC_TURNSTILE_SITE_KEY=...
+\`\`\`
+
+Important:
+
+The client-side widget alone does not protect your app. The server must call Siteverify for every protected submit.
+
+Human explanation:
+
+Turnstile is Cloudflare's bot check. It helps protect forms like signup, login, waitlists, contact forms, and checkout.
+`;
+}
+
+function cronDoc(cronName: string, schedule: string): string {
+  const functionName = `run${pascalCase(cronName)}`;
+
+  return `# Flarecel Cron Trigger
+
+This recipe adds a Cloudflare Cron Trigger.
+
+Job: \`${cronName}\`
+Schedule: \`${schedule}\`
+Helper: \`src/cloudflare/cron/${cronName}.ts\`
+
+Wrangler config now includes this schedule under:
+
+\`\`\`json
+{
+  "triggers": {
+    "crons": ["${schedule}"]
+  }
+}
+\`\`\`
+
+Wire the helper into a Worker scheduled handler:
+
+\`\`\`ts
+import { ${functionName} } from "./cloudflare/cron/${cronName}";
+
+export default {
+  async scheduled(controller: ScheduledController) {
+    await ${functionName}({
+      cron: controller.cron,
+      scheduledTime: controller.scheduledTime
+    });
+  }
+};
+\`\`\`
+
+Human explanation:
+
+Cron Triggers let Cloudflare run scheduled jobs like cleanup, syncs, digests, billing checks, and cache warmups.
+`;
+}
+
+function workersAiDoc(model: string, routePath: string): string {
+  return `# Flarecel Workers AI
+
+This recipe adds a Workers AI binding and a simple generation route.
+
+Binding: \`AI\`
+Default model: \`${model}\`
+Route: \`${routePath}\`
+
+Regenerate binding types:
+
+\`\`\`bash
+npm run cf-typegen
+\`\`\`
+
+Estimate usage:
+
+\`\`\`bash
+flarecel cost --workers-ai-neurons 300000 --json
+\`\`\`
+
+Human explanation:
+
+Workers AI lets your app run AI models through Cloudflare's platform without managing model infrastructure. Usage is metered, so add rate limits before public launch.
+`;
+}
+
+function vectorizeDoc(indexName: string, binding: string, dimensions: number, metric: string): string {
+  return `# Flarecel Vectorize
+
+This recipe adds a Cloudflare Vectorize index binding.
+
+Binding: \`${binding}\`
+Index: \`${indexName}\`
+Dimensions: ${dimensions}
+Metric: \`${metric}\`
+
+Create the remote index:
+
+\`\`\`bash
+wrangler vectorize create ${indexName} --dimensions=${dimensions} --metric=${metric}
+\`\`\`
+
+Important:
+
+Vector dimensions and metric cannot be changed after the index is created. Match dimensions to your embedding model.
+
+Estimate usage:
+
+\`\`\`bash
+flarecel cost --vectorize-queries 30000 --vectorize-stored-vectors 10000 --vectorize-dimensions ${dimensions} --json
+\`\`\`
+
+Human explanation:
+
+Vectorize is Cloudflare's vector database for semantic search, recommendations, RAG, and AI memory.
+`;
+}
+
+function aiGatewayDoc(provider: string): string {
+  return `# Flarecel AI Gateway
+
+This recipe adds an AI Gateway helper for provider: \`${provider}\`.
+
+Environment values:
+
+- \`CLOUDFLARE_ACCOUNT_ID\`
+- \`AI_GATEWAY_ID\`
+- \`OPENAI_API_KEY\` when using OpenAI
+- \`CF_AIG_TOKEN\` when your gateway requires Cloudflare AI Gateway auth
+
+Set production secrets:
+
+\`\`\`bash
+wrangler secret put OPENAI_API_KEY
+wrangler secret put CF_AIG_TOKEN
+\`\`\`
+
+Human explanation:
+
+AI Gateway routes AI provider calls through Cloudflare so you can add observability, caching, retries, and governance around model usage.
+`;
+}
+
+function observabilityDoc(sampling: number): string {
+  return `# Flarecel Observability
+
+This recipe enables Workers Logs in Wrangler.
+
+Sampling rate: ${sampling}
+
+Tail logs locally:
+
+\`\`\`bash
+npm run logs:tail
+\`\`\`
+
+After deploy, use Cloudflare Workers Logs and Query Builder to inspect requests, errors, CPU time, and logs.
+
+Human explanation:
+
+Observability is how you debug production without guessing. It should be enabled before launch, not after something breaks.
+`;
+}
+
+function durableObjectDoc(objectName: string, binding: string, className: string, routePath: string): string {
+  return `# Flarecel Durable Object
+
+This recipe adds a SQLite-backed Cloudflare Durable Object.
+
+Object: \`${objectName}\`
+Binding: \`${binding}\`
+Class: \`${className}\`
+Demo route: \`${routePath}\`
+
+What changed:
+
+- \`wrangler.jsonc\` now has a \`durable_objects.bindings\` entry.
+- \`wrangler.jsonc\` now has a migration tag with \`new_sqlite_classes\`.
+- OpenNext apps use \`cloudflare-worker.ts\` so Wrangler can export the Durable Object class and the Next.js fetch handler together.
+
+Try the demo route:
+
+\`\`\`bash
+curl -X POST "http://localhost:8787/api/durable-objects/${objectName}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"demo","key":"visits"}'
+\`\`\`
+
+Human explanation:
+
+Durable Objects are for strongly consistent per-object state: rooms, carts, collaborative sessions, locks, game lobbies, rate limit state, and tiny state machines.
+
+Do not delete or rename deployed migration tags casually. Durable Object migrations are part of production state history.
+`;
+}
+
+function workflowDoc(
+  workflowName: string,
+  workflowSlug: string,
+  binding: string,
+  className: string,
+  routePath: string,
+  schedule: string | null
+): string {
+  return `# Flarecel Workflow
+
+This recipe adds a Cloudflare Workflow.
+
+Workflow: \`${workflowName}\`
+Binding: \`${binding}\`
+Class: \`${className}\`
+Trigger route: \`${routePath}\`
+Schedule: ${schedule ? `\`${schedule}\`` : "none"}
+
+Start an instance:
+
+\`\`\`bash
+curl -X POST "http://localhost:8787/api/workflows/${workflowSlug}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"params":{"name":"demo","source":"curl"}}'
+\`\`\`
+
+List instances:
+
+\`\`\`bash
+npm run workflows:list
+\`\`\`
+
+Human explanation:
+
+Workflows are durable multi-step jobs. Use them for onboarding, billing follow-ups, AI pipelines, webhooks, imports, retries, approvals, and jobs that should survive a deploy.
+`;
+}
+
+function browserRunDoc(binding: string, routePath: string): string {
+  return `# Flarecel Browser Run
+
+This recipe adds Cloudflare Browser Run with \`@cloudflare/puppeteer\`.
+
+Binding: \`${binding}\`
+Screenshot route: \`${routePath}\`
+
+Try the demo route:
+
+\`\`\`bash
+curl "http://localhost:8787/api/browser/screenshot?url=https://example.com" --output screenshot.jpg
+\`\`\`
+
+Estimate usage:
+
+\`\`\`bash
+flarecel cost --browser-run-hours 20 --browser-run-concurrency 10 --json
+\`\`\`
+
+Human explanation:
+
+Browser Run lets a Worker drive a real browser for screenshots, PDFs, rendered crawling, link previews, and browser-like agent tasks. It is the Cloudflare-native replacement for trying to bundle normal Puppeteer or Playwright into a Worker.
+
+Security note:
+
+Do not expose arbitrary browser rendering to the public without auth, rate limits, URL allowlists, and timeout controls.
+`;
+}
+
+function queueDoc(binding: string, queueName: string): string {
+  return `# Flarecel Queue
+
+This recipe adds a Cloudflare Queue.
+
+Binding: \`${binding}\`
+Queue: \`${queueName}\`
+
+Create the remote queue:
+
+\`\`\`bash
+wrangler queues create ${queueName}
+\`\`\`
+
+Use queues for background work like emails, webhook retries, AI jobs, or ingestion.
+
+This MVP wires the producer binding. For consumption, use a custom OpenNext Worker entry or a separate consumer Worker and attach it with Wrangler.
+`;
+}
+
+function betterAuthDoc(db: string, orm: string): string {
+  return `# Better Auth On Cloudflare
+
+Status: planned recipe placeholder.
+
+Requested stack:
+
+- Auth: Better Auth
+- Database: ${db}
+- ORM: ${orm}
+
+MVP rule:
+
+Do not generate Better Auth code until the base Next.js -> OpenNext -> Workers flow is proven end-to-end.
+
+Future recipe should generate:
+
+- Better Auth install
+- D1 binding when \`db=d1\`
+- Drizzle schema when \`orm=drizzle\`
+- Auth route handler
+- Wrangler secrets checklist
+- OAuth callback domain checklist
+- Turnstile signup protection option
+`;
+}
+
+function betterAuthD1DrizzleDoc(databaseName: string, binding: string): string {
+  return `# Flarecel Better Auth + D1 + Drizzle
+
+This recipe wires Better Auth to Cloudflare D1 through Drizzle.
+
+Binding: \`${binding}\`
+Database: \`${databaseName}\`
+Migration directory: \`drizzle\`
+
+Create the remote D1 database:
+
+\`\`\`bash
+wrangler d1 create ${databaseName}
+\`\`\`
+
+Copy the returned \`database_id\` into \`wrangler.jsonc\`.
+
+Generate a local secret:
+
+\`\`\`bash
+openssl rand -base64 32
+\`\`\`
+
+Set the production secret:
+
+\`\`\`bash
+wrangler secret put BETTER_AUTH_SECRET
+\`\`\`
+
+Generate and apply migrations:
+
+\`\`\`bash
+npm run db:generate
+npm run db:migrate:local
+npm run db:migrate:remote
+\`\`\`
+
+Security note:
+
+Do not do full database-backed auth checks in old Edge middleware. Prefer route/page/server-action checks, or Next 16 proxy with a runtime that supports the needed APIs.
+`;
+}
+
+function nextRoutePath(ctx: ProjectContext, segment: string): string {
+  const srcApp = path.join(ctx.cwd, "src", "app");
+  const app = path.join(ctx.cwd, "app");
+
+  if (pathExistsSync(srcApp)) return `src/app/api/${segment}/route.ts`;
+  if (pathExistsSync(app)) return `app/api/${segment}/route.ts`;
+  return `app/api/${segment}/route.ts`;
+}
+
+function nextLibPath(ctx: ProjectContext, fileName: string): string {
+  return pathExistsSync(path.join(ctx.cwd, "src", "app"))
+    ? `src/lib/${fileName}`
+    : `lib/${fileName}`;
+}
+
+function nextDbPath(ctx: ProjectContext, fileName: string): string {
+  return pathExistsSync(path.join(ctx.cwd, "src", "app"))
+    ? `src/db/${fileName}`
+    : `db/${fileName}`;
+}
+
+function nextLibPathFromSchema(schemaFile: string): string {
+  return schemaFile.startsWith("src/")
+    ? "src/lib/auth.ts"
+    : "lib/auth.ts";
+}
+
+function relativeImport(fromFile: string, toFile: string): string {
+  let relativePath = path.relative(path.dirname(fromFile), toFile.replace(/\.ts$/, ""));
+  if (!relativePath.startsWith(".")) relativePath = `./${relativePath}`;
+  return relativePath.replace(/\\/g, "/");
+}
+
+function parseLimit(value: string): { limit: number; period: 10 | 60 } {
+  const match = value.match(/^(\d+)\/(10s|60s|min|minute)$/);
+  if (!match) return { limit: 20, period: 60 };
+
+  return {
+    limit: Number(match[1]),
+    period: match[2] === "10s" ? 10 : 60
+  };
+}
+
+function numericOption(value: string | boolean | undefined, fallback: number): number {
+  if (typeof value !== "string") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseVectorMetric(value: string): string {
+  return ["cosine", "euclidean", "dot-product"].includes(value) ? value : "cosine";
+}
+
+function parseSampling(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function addUniqueStrings(existing: unknown, values: string[]): string[] {
+  const set = new Set(Array.isArray(existing) ? existing.filter((value) => typeof value === "string") as string[] : []);
+  for (const value of values) set.add(value);
+  return [...set];
+}
+
+function upsertArrayObject(existing: unknown, key: string, value: JsonObject): JsonObject[] {
+  const array = Array.isArray(existing) ? existing.filter(isObject) : [];
+  const index = array.findIndex((candidate) => candidate[key] === value[key]);
+
+  if (index === -1) return [...array, value];
+
+  const next = [...array];
+  next[index] = { ...next[index], ...value };
+  return next;
+}
+
+function upsertDurableObjectMigration(existing: unknown, tag: string, className: string): JsonObject[] {
+  const migrations = Array.isArray(existing) ? existing.filter(isObject) : [];
+  const index = migrations.findIndex((candidate) => candidate.tag === tag);
+
+  if (index === -1) {
+    return [
+      ...migrations,
+      {
+        tag,
+        new_sqlite_classes: [className]
+      }
+    ];
+  }
+
+  const next = [...migrations];
+  const migration = { ...next[index] };
+  migration.new_sqlite_classes = addUniqueStrings(migration.new_sqlite_classes, [className]);
+  next[index] = migration;
+  return next;
+}
+
+function asObject(value: unknown): JsonObject {
+  return isObject(value) ? { ...value } : {};
+}
+
+function isObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function sanitizeFeatureName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "feature";
+}
+
+function sanitizeQueueName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "jobs";
+}
+
+function pascalCase(value: string): string {
+  const result = value
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join("");
+
+  return result || "Job";
+}
+
+function pathExistsSync(filePath: string): boolean {
+  return existsSync(filePath);
+}
+
+function unknownRecipe(name: string): ChangeSet {
+  return {
+    status: "error",
+    title: `Unknown recipe: ${name}`,
+    changes: [],
+    warnings: [`Recipe "${name}" is not implemented yet.`],
+    nextActions: ["flarecel plan --json"]
+  };
+}

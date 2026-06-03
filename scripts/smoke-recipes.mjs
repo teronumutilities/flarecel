@@ -1,0 +1,294 @@
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import ts from "typescript";
+
+const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const cli = path.join(repoRoot, "dist", "cli.js");
+const fixture = path.join(repoRoot, "fixtures", "next-basic");
+
+smokeR2Recipe();
+smokeBetterAuthRecipe();
+smokeCloudflareFeatureRecipes();
+smokeAiAndObservabilityRecipes();
+smokeStatefulAndBrowserRecipes();
+
+function smokeR2Recipe() {
+  const tmp = copyFixture("flarecel-r2-");
+  try {
+    const result = run(["add", "r2", "uploads", "--dry-run", "--json", "--cwd", tmp]);
+    assertEqual(result.status, 0, result.stderr);
+    const changeSet = JSON.parse(result.stdout);
+    assertGeneratedTypescriptParses(changeSet);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function smokeBetterAuthRecipe() {
+  const tmp = copyFixture("flarecel-auth-");
+  try {
+    const dryRun = run(["add", "auth", "better-auth", "--db", "d1", "--orm", "drizzle", "--dry-run", "--json", "--cwd", tmp]);
+    assertEqual(dryRun.status, 0, dryRun.stderr);
+    const changeSet = JSON.parse(dryRun.stdout);
+
+    assertNoDuplicatePaths(changeSet);
+    assertHasChange(changeSet, "app/api/auth/[...all]/route.ts");
+    assertGeneratedTypescriptParses(changeSet);
+
+    const apply = run(["add", "auth", "better-auth", "--db", "d1", "--orm", "drizzle", "--apply", "--yes", "--json", "--cwd", tmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const provision = run(["provision", "--json", "--cwd", tmp]);
+    assertEqual(provision.status, 0, provision.stderr);
+    const provisionReport = JSON.parse(provision.stdout);
+    if (!provisionReport.actions?.some((action) => (action.command ?? []).join(" ") === "wrangler d1 create next-basic-auth")) {
+      throw new Error("Expected provisioning plan to include D1 create command.");
+    }
+
+    const verify = run(["verify", "--json", "--cwd", tmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "better-auth-installed", "passed");
+    assertCheck(verifyReport, "better-auth-route", "passed");
+    assertCheck(verifyReport, "better-auth-d1-binding", "passed");
+    assertCheck(verifyReport, "better-auth-d1-database-id", "warning");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function smokeCloudflareFeatureRecipes() {
+  smokeDryRunRecipe(
+    ["add", "db", "d1", "--orm", "drizzle", "--dry-run", "--json"],
+    ["db/schema.ts", "lib/db.ts", "drizzle.config.ts"]
+  );
+
+  const kvTmp = copyFixture("flarecel-kv-");
+  try {
+    const apply = run(["add", "kv", "cache", "--apply", "--yes", "--json", "--cwd", kvTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const provision = run(["provision", "--json", "--cwd", kvTmp]);
+    assertEqual(provision.status, 0, provision.stderr);
+    const provisionReport = JSON.parse(provision.stdout);
+    if (!provisionReport.actions?.some((action) => (action.command ?? []).join(" ") === "wrangler kv namespace create CACHE")) {
+      throw new Error("Expected provisioning plan to include KV namespace create command.");
+    }
+
+    const verify = run(["verify", "--json", "--cwd", kvTmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "kv-binding-cache", "warning");
+  } finally {
+    rmSync(kvTmp, { recursive: true, force: true });
+  }
+
+  smokeDryRunRecipe(
+    ["add", "turnstile", "--form", "signup", "--dry-run", "--json"],
+    ["src/cloudflare/turnstile.ts", "app/api/turnstile/signup/verify/route.ts"]
+  );
+
+  const cron = smokeDryRunRecipe(
+    ["add", "cron", "daily-cleanup", "--schedule", "0 0 * * *", "--dry-run", "--json"],
+    ["src/cloudflare/cron/daily-cleanup.ts"]
+  );
+  const wrangler = cron.changes?.find((change) => change.path === "wrangler.jsonc");
+  if (!wrangler?.after.includes("\"crons\"")) {
+    throw new Error("Expected Cron recipe to add triggers.crons to wrangler.jsonc.");
+  }
+
+  const cronTmp = copyFixture("flarecel-cron-");
+  try {
+    const apply = run(["add", "cron", "daily-cleanup", "--schedule", "0 0 * * *", "--apply", "--yes", "--json", "--cwd", cronTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const verify = run(["verify", "--json", "--cwd", cronTmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "cron-triggers", "passed");
+  } finally {
+    rmSync(cronTmp, { recursive: true, force: true });
+  }
+}
+
+function smokeAiAndObservabilityRecipes() {
+  const workersAiTmp = copyFixture("flarecel-workers-ai-");
+  try {
+    rmSync(path.join(workersAiTmp, "app", "api", "edge-risk"), { recursive: true, force: true });
+    const apply = run(["add", "workers-ai", "--apply", "--yes", "--json", "--cwd", workersAiTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const verify = run(["verify", "--json", "--cwd", workersAiTmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "workers-ai-binding", "passed");
+  } finally {
+    rmSync(workersAiTmp, { recursive: true, force: true });
+  }
+
+  const vectorizeTmp = copyFixture("flarecel-vectorize-");
+  try {
+    const apply = run(["add", "vectorize", "docs-search", "--dimensions", "768", "--metric", "cosine", "--apply", "--yes", "--json", "--cwd", vectorizeTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const provision = run(["provision", "--json", "--cwd", vectorizeTmp]);
+    assertEqual(provision.status, 0, provision.stderr);
+    const provisionReport = JSON.parse(provision.stdout);
+    if (!provisionReport.actions?.some((action) => (action.command ?? []).join(" ") === "wrangler vectorize create next-basic-docs-search --dimensions=768 --metric=cosine")) {
+      throw new Error("Expected provisioning plan to include Vectorize create command.");
+    }
+  } finally {
+    rmSync(vectorizeTmp, { recursive: true, force: true });
+  }
+
+  smokeDryRunRecipe(
+    ["add", "ai-gateway", "--provider", "openai", "--dry-run", "--json"],
+    ["src/cloudflare/ai-gateway.ts", "docs/flarecel-ai-gateway.md"]
+  );
+
+  const observabilityTmp = copyFixture("flarecel-observability-");
+  try {
+    const apply = run(["add", "observability", "--sampling", "0.5", "--apply", "--yes", "--json", "--cwd", observabilityTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const verify = run(["verify", "--json", "--cwd", observabilityTmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "observability-enabled", "passed");
+  } finally {
+    rmSync(observabilityTmp, { recursive: true, force: true });
+  }
+}
+
+function smokeStatefulAndBrowserRecipes() {
+  const durableTmp = copyFixture("flarecel-do-");
+  try {
+    const apply = run(["add", "durable-object", "room", "--apply", "--yes", "--json", "--cwd", durableTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const provision = run(["provision", "--json", "--cwd", durableTmp]);
+    assertEqual(provision.status, 0, provision.stderr);
+    const provisionReport = JSON.parse(provision.stdout);
+    if (!provisionReport.actions?.some((action) => action.id === "durable-object:ROOM_DO" && action.status === "skipped")) {
+      throw new Error("Expected provisioning plan to explain Durable Object deploy migration.");
+    }
+
+    const verify = run(["verify", "--json", "--cwd", durableTmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "durable-object-binding-room-do", "passed");
+    assertCheck(verifyReport, "durable-object-export-roomdurableobject", "passed");
+    assertCheck(verifyReport, "durable-object-migration-roomdurableobject", "passed");
+  } finally {
+    rmSync(durableTmp, { recursive: true, force: true });
+  }
+
+  const workflowTmp = copyFixture("flarecel-workflow-");
+  try {
+    const apply = run(["add", "workflow", "onboarding", "--schedule", "0 9 * * *", "--apply", "--yes", "--json", "--cwd", workflowTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const verify = run(["verify", "--json", "--cwd", workflowTmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "workflow-binding-onboarding-workflow", "passed");
+    assertCheck(verifyReport, "workflow-export-onboardingworkflow", "passed");
+    assertCheck(verifyReport, "observability-enabled", "passed");
+  } finally {
+    rmSync(workflowTmp, { recursive: true, force: true });
+  }
+
+  const browserTmp = copyFixture("flarecel-browser-");
+  try {
+    const apply = run(["add", "browser-run", "--apply", "--yes", "--json", "--cwd", browserTmp]);
+    assertEqual(apply.status, 0, apply.stderr);
+
+    const verify = run(["verify", "--json", "--cwd", browserTmp]);
+    const verifyReport = JSON.parse(verify.stdout);
+    assertCheck(verifyReport, "browser-run-binding", "passed");
+    assertCheck(verifyReport, "browser-run-nodejs-compat", "passed");
+  } finally {
+    rmSync(browserTmp, { recursive: true, force: true });
+  }
+
+  smokeDryRunRecipe(
+    ["add", "durable-object", "counter", "--dry-run", "--json"],
+    ["src/cloudflare/durable-objects/counter.ts", "cloudflare-worker.ts", "app/api/durable-objects/counter/route.ts"]
+  );
+
+  smokeDryRunRecipe(
+    ["add", "workflow", "importer", "--schedule", "0 9 * * *", "--dry-run", "--json"],
+    ["src/cloudflare/workflows/importer.ts", "cloudflare-worker.ts", "app/api/workflows/importer/route.ts"]
+  );
+
+  smokeDryRunRecipe(
+    ["add", "browser-run", "--dry-run", "--json"],
+    ["src/cloudflare/browser-run.ts", "app/api/browser/screenshot/route.ts"]
+  );
+}
+
+function smokeDryRunRecipe(args, expectedPaths) {
+  const result = run([...args, "--cwd", fixture]);
+  assertEqual(result.status, 0, result.stderr);
+  const changeSet = JSON.parse(result.stdout);
+  assertNoDuplicatePaths(changeSet);
+  for (const expectedPath of expectedPaths) assertHasChange(changeSet, expectedPath);
+  assertGeneratedTypescriptParses(changeSet);
+  return changeSet;
+}
+
+function copyFixture(prefix) {
+  const tmp = mkdtempSync(path.join(tmpdir(), prefix));
+  cpSync(fixture, tmp, { recursive: true });
+  return tmp;
+}
+
+function run(args) {
+  return spawnSync(process.execPath, [cli, ...args], {
+    cwd: repoRoot,
+    encoding: "utf8"
+  });
+}
+
+function assertGeneratedTypescriptParses(changeSet) {
+  for (const change of changeSet.changes ?? []) {
+    if (!/\.(d\.ts|ts|tsx)$/.test(change.path)) continue;
+
+    const sourceFile = ts.createSourceFile(
+      change.path,
+      change.after,
+      ts.ScriptTarget.ES2022,
+      true,
+      change.path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+    );
+
+    if (sourceFile.parseDiagnostics.length > 0) {
+      const message = sourceFile.parseDiagnostics
+        .map((diagnostic) => `${change.path}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`)
+        .join("\n");
+      throw new Error(message);
+    }
+  }
+}
+
+function assertNoDuplicatePaths(changeSet) {
+  const seen = new Set();
+  for (const change of changeSet.changes ?? []) {
+    if (seen.has(change.path)) throw new Error(`Duplicate generated path: ${change.path}`);
+    seen.add(change.path);
+  }
+}
+
+function assertHasChange(changeSet, filePath) {
+  if (!changeSet.changes?.some((change) => change.path === filePath)) {
+    throw new Error(`Expected generated file: ${filePath}`);
+  }
+}
+
+function assertCheck(report, id, status) {
+  const check = report.checks?.find((candidate) => candidate.id === id);
+  if (!check) throw new Error(`Missing verify check: ${id}`);
+  if (check.status !== status) throw new Error(`Expected ${id} to be ${status}, got ${check.status}`);
+}
+
+function assertEqual(actual, expected, message) {
+  if (actual !== expected) {
+    throw new Error(message || `Expected ${expected}, got ${actual}`);
+  }
+}

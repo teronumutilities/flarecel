@@ -1,0 +1,5 @@
+node_modules
+dist
+.flarecel
+.DS_Store
+outputs
