@@ -97,6 +97,7 @@ Implemented now:
 - Apply-safe fixes with `--apply --yes`.
 - MVP recipes for OpenNext, R2 uploads, D1 + Drizzle, KV cache, Rate Limiting, Queues, Turnstile, Cron Triggers, Workers AI, Vectorize, AI Gateway, Observability, Durable Objects, Workflows, and Browser Run.
 - MVP Better Auth + D1 + Drizzle recipe.
+- Experimental third-party recipes (verified against provider + Cloudflare docs, 2026-06-04): `auth clerk`, `auth supabase`, `auth authjs`, `auth cloudflare-access`, `db d1 --orm prisma`, `db supabase`, `db neon`, `db turso`, `db planetscale`, `db mongodb`, `backend convex`, `redis upstash`. Each generates Workers-safe client code and is labeled experimental in its generated doc.
 - App kits (`kit saas`, `kit ai-app`) that compose multiple recipes into one reviewable change set.
 - `doctor --fix` to chain doctor -> fix -> verify in one call.
 - Pinned recipe dependency versions (caret ranges) instead of `latest`.

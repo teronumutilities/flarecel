@@ -227,7 +227,19 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
         { name: "durable-object room", maturity: "mvp", writesFiles: true },
         { name: "workflow onboarding --schedule \"0 9 * * *\"", maturity: "mvp", writesFiles: true },
         { name: "browser-run", maturity: "mvp", writesFiles: true },
-        { name: "auth better-auth --db d1 --orm drizzle", maturity: "mvp", writesFiles: true }
+        { name: "auth better-auth --db d1 --orm drizzle", maturity: "mvp", writesFiles: true },
+        { name: "auth clerk", maturity: "experimental", writesFiles: true },
+        { name: "auth supabase", maturity: "experimental", writesFiles: true },
+        { name: "auth authjs", maturity: "experimental", writesFiles: true },
+        { name: "auth cloudflare-access", maturity: "experimental", writesFiles: true },
+        { name: "db d1 --orm prisma", maturity: "experimental", writesFiles: true },
+        { name: "db supabase --mode http|hyperdrive", maturity: "experimental", writesFiles: true },
+        { name: "db neon --mode serverless|hyperdrive", maturity: "experimental", writesFiles: true },
+        { name: "db turso", maturity: "experimental", writesFiles: true },
+        { name: "db planetscale", maturity: "experimental", writesFiles: true },
+        { name: "db mongodb", maturity: "experimental", writesFiles: true },
+        { name: "backend convex", maturity: "experimental", writesFiles: true },
+        { name: "redis upstash", maturity: "experimental", writesFiles: true }
       ]
     });
   }

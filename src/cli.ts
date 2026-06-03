@@ -270,6 +270,14 @@ Usage:
   flarecel add next-opennext [--dry-run] [--format patch]
   flarecel add r2 uploads [--dry-run] [--format patch]
   flarecel add db d1 --orm drizzle [--dry-run] [--format patch]
+  flarecel add db d1 --orm prisma [--dry-run]
+  flarecel add db neon --mode serverless|hyperdrive [--dry-run]
+  flarecel add db supabase --mode http|hyperdrive [--dry-run]
+  flarecel add db turso|planetscale|mongodb [--dry-run]
+  flarecel add auth better-auth --db d1 --orm drizzle [--dry-run]
+  flarecel add auth clerk|supabase|authjs|cloudflare-access [--dry-run]
+  flarecel add backend convex [--dry-run]
+  flarecel add redis upstash [--dry-run]
   flarecel add kv cache [--dry-run] [--format patch]
   flarecel add turnstile --form signup
   flarecel add rate-limit --route /api/generate --limit 20/min

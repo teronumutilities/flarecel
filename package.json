@@ -21,7 +21,8 @@
     "smoke:deploy-cost": "npm run build && node scripts/smoke-deploy-cost.mjs",
     "smoke:redact": "npm run build && node scripts/smoke-redact.mjs",
     "smoke:kit": "npm run build && node scripts/smoke-kit.mjs",
-    "test": "npm run smoke && npm run smoke:mcp && npm run smoke:auth && npm run smoke:recipes && npm run smoke:deploy-cost && npm run smoke:redact && npm run smoke:kit",
+    "smoke:providers": "npm run build && node scripts/smoke-providers.mjs",
+    "test": "npm run smoke && npm run smoke:mcp && npm run smoke:auth && npm run smoke:recipes && npm run smoke:deploy-cost && npm run smoke:redact && npm run smoke:kit && npm run smoke:providers",
     "doctor": "node dist/cli.js doctor"
   },
   "devDependencies": {
