@@ -148,47 +148,73 @@ export function splash(): string {
   ].join("\n");
 }
 
-// Opt-in easter egg: the cloud and the triangle actually throw down.
-// A 3-line scene redrawn in place each frame. Animated only on a TTY;
-// otherwise prints the final frame once.
+// Boot animation: a big orange cloud and a small triangle approach each other,
+// then vanish — leaving just the word "flarecel". No labels, no KO. Mysterious.
 export async function playVersus(): Promise<void> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const W = 34;
-  const cloud = c.orange("(~cf~)");
-  const tri = c.white("\u25b2");
-  const spark = c.yellow("\u2726");
-  const ground = c.gray("\u2500".repeat(W));
+  const LINES = 5;
+  const cloudArt = [
+    "     .~~~.",
+    "   .(     ).",
+    "  (  cloud  )",
+    " (           )",
+    "  '~-------~'"
+  ];
+  const triArt = [
+    "    /\\    ",
+    "   /  \\   ",
+    "  /    \\  ",
+    " /      \\ ",
+    "/________\\"
+  ];
 
-  const render = (top: string, fight: string) => `  ${top}\n  ${fight}\n  ${ground}\n`;
-  // Approach: cloud walks right from 0, triangle walks left from 26, one column
-  // per frame, so the motion is large and obvious.
-  const lane = (cloudCol: number, triCol: number) =>
-    " ".repeat(cloudCol) + cloud + " ".repeat(Math.max(1, triCol - cloudCol)) + tri;
+  const paintCloud = (lines: string[]) => lines.map((l) => c.orange(l));
+  const paintTri = (lines: string[]) => lines.map((l) => c.white(l));
+  const W = 50;
 
-  const countdown = ["", "ready\u2026", "ready\u2026", "3", "2", "1", "1", "1"];
-  const frames: Array<[string, string, number]> = [];
-  frames.push([c.dim("cloudflare   vs   vercel"), lane(0, 26), 700]);
-  for (let step = 1; step <= 8; step += 1) {
-    const label = step >= 8 ? c.bold(c.yellow("FIGHT!")) : c.dim(countdown[step] ?? "");
-    frames.push([label, lane(step, 26 - step), step >= 6 ? 150 : 230]);
-  }
-  frames.push([c.bold(c.yellow("FIGHT!")), `${" ".repeat(9)}${cloud}${spark}${spark}${tri}`, 200]);
-  frames.push([c.bold(c.yellow("FIGHT!")), `${" ".repeat(9)}${cloud}${spark}${spark}${spark} ${c.dim("\u25b5\u25bf")}`, 220]);
-  frames.push([c.bold(c.green("K.O. \u2014 cloudflare wins")), `${" ".repeat(9)}${cloud}  ${spark}  ${c.dim("\u25bf \u00b4 ,")}`, 600]);
+  // Each frame: render cloud at cloudX, triangle at triX within a W-wide field.
+  const frame = (cloudX: number, triX: number): string[] => {
+    const out: string[] = [];
+    for (let row = 0; row < LINES; row += 1) {
+      const cl = cloudArt[row];
+      const tr = triArt[row];
+      const gap = Math.max(0, triX - cloudX - cl.length);
+      out.push(" ".repeat(Math.max(0, cloudX)) + c.orange(cl) + " ".repeat(gap) + c.white(tr));
+    }
+    return out;
+  };
 
+  const render = (lines: string[]) => lines.map((l) => `  ${l}`).join("\n") + "\n";
+
+  // Non-TTY: just print the word.
   if (!process.stdout.isTTY) {
-    const last = frames[frames.length - 1];
-    process.stdout.write(render(last[0], last[1]));
+    process.stdout.write(`  ${c.bold(c.orange("flarecel"))}\n`);
     return;
   }
+
+  // Approach: cloud starts left, triangle starts right, they walk toward center.
+  const steps = 8;
+  const startTriX = W - 10;
   process.stdout.write("\x1b[?25l"); // hide cursor
-  for (let i = 0; i < frames.length; i += 1) {
-    if (i > 0) process.stdout.write("\x1b[3A"); // move up 3 lines to redraw
-    process.stdout.write(`\x1b[J${render(frames[i][0], frames[i][1])}`);
-    await sleep(frames[i][2]);
+
+  for (let i = 0; i <= steps; i += 1) {
+    const cloudX = i * 2;
+    const triX = startTriX - i * 3;
+    if (i > 0) process.stdout.write(`\x1b[${LINES}A`); // move up to redraw
+    process.stdout.write(`\x1b[J${render(frame(cloudX, triX))}`);
+    await sleep(200);
   }
+
+  // They meet — hold a beat.
+  await sleep(400);
+
+  // Vanish: clear the scene.
+  process.stdout.write(`\x1b[${LINES}A\x1b[J`);
+  await sleep(300);
+
+  // Just the word, small, understated.
+  process.stdout.write(`\n  ${c.bold(c.orange("flarecel"))}\n\n`);
   process.stdout.write("\x1b[?25h"); // show cursor
-  process.stdout.write(`  ${c.bold(c.orange("flarecel"))} ${c.dim(sym.dot)} ${c.dim("vercel vibes. cloudflare bills.")}\n`);
 }
 
 
