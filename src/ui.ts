@@ -156,7 +156,7 @@ export async function playVersus(): Promise<void> {
   const cloudArt = [
     "     .~~~.",
     "   .(     ).",
-    "  (  cloud  )",
+    "  (         )",
     " (           )",
     "  '~-------~'"
   ];
@@ -186,9 +186,15 @@ export async function playVersus(): Promise<void> {
 
   const render = (lines: string[]) => lines.map((l) => `  ${l}`).join("\n") + "\n";
 
-  // Non-TTY: just print the word.
+  // Non-TTY: just print the word big.
   if (!process.stdout.isTTY) {
-    process.stdout.write(`  ${c.bold(c.orange("flarecel"))}\n`);
+    const big = [
+      " ___  _                          _ ",
+      "|  _|| |  __ _ _ _ ___ __ ___  | |",
+      "| |_ | | / _` | '_/ -_) _/ -_) | |",
+      "|_|  |_| \\__,_|_| \\___\\__\\___| |_|"
+    ];
+    process.stdout.write(`${big.map((l) => `  ${c.bold(c.orange(l))}`).join("\n")}\n`);
     return;
   }
 
@@ -212,8 +218,14 @@ export async function playVersus(): Promise<void> {
   process.stdout.write(`\x1b[${LINES}A\x1b[J`);
   await sleep(300);
 
-  // Just the word, small, understated.
-  process.stdout.write(`\n  ${c.bold(c.orange("flarecel"))}\n\n`);
+  // Just the word, BIG, understated.
+  const big = [
+    " ___  _                          _ ",
+    "|  _|| |  __ _ _ _ ___ __ ___  | |",
+    "| |_ | | / _` | '_/ -_) _/ -_) | |",
+    "|_|  |_| \\__,_|_| \\___\\__\\___| |_|"
+  ];
+  process.stdout.write(`\n${big.map((l) => `  ${c.bold(c.orange(l))}`).join("\n")}\n\n`);
   process.stdout.write("\x1b[?25h"); // show cursor
 }
 
