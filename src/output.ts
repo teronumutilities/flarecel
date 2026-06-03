@@ -129,8 +129,7 @@ export function printCost(report: CostReport): void {
   printWarnings(report.warnings);
 
   console.log("");
-  console.log(c.dim("Sources:"));
-  for (const source of report.sources) console.log(`  ${c.gray(sym.dot)} ${c.gray(`${source.name}: ${source.url}`)}`);
+  console.log(c.dim(`Based on ${report.sources.length} Cloudflare pricing pages \u00b7 see --json for source URLs.`));
 
   printNextActions(report.nextActions);
 }

@@ -153,35 +153,39 @@ export function splash(): string {
 // otherwise prints the final frame once.
 export async function playVersus(): Promise<void> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const W = 30;
+  const W = 34;
   const cloud = c.orange("(~cf~)");
   const tri = c.white("\u25b2");
   const spark = c.yellow("\u2726");
-  const sky = (left: number, right: number) =>
-    " ".repeat(Math.max(0, left)) + cloud + " ".repeat(Math.max(1, right - left)) + tri;
-  // Each frame: [topLine, fightLine, groundLine]
   const ground = c.gray("\u2500".repeat(W));
-  const finalFight = `${cloud} ${spark}${spark}${spark} ${c.dim("\u25bf")} ${c.green("K.O.")}`;
-  const frames: string[][] = [
-    [c.dim("cloudflare        vercel"), sky(0, 22), ground],
-    [c.dim("       face-off"), sky(4, 14), ground],
-    [c.dim("         clash"), sky(9, 4), ground],
-    ["", `${" ".repeat(11)}${cloud}${spark}${tri}`, ground],
-    ["", `${" ".repeat(11)}${cloud}${spark}${spark} ${c.dim("\u25b5\u25bf")}`, ground],
-    [c.bold(c.green("         winner")), `${" ".repeat(11)}${finalFight}`, ground]
-  ];
 
-  const render = (f: string[]) => `  ${f[0]}\n  ${f[1]}\n  ${f[2]}\n`;
+  const render = (top: string, fight: string) => `  ${top}\n  ${fight}\n  ${ground}\n`;
+  // Approach: cloud walks right from 0, triangle walks left from 26, one column
+  // per frame, so the motion is large and obvious.
+  const lane = (cloudCol: number, triCol: number) =>
+    " ".repeat(cloudCol) + cloud + " ".repeat(Math.max(1, triCol - cloudCol)) + tri;
+
+  const countdown = ["", "ready\u2026", "ready\u2026", "3", "2", "1", "1", "1"];
+  const frames: Array<[string, string, number]> = [];
+  frames.push([c.dim("cloudflare   vs   vercel"), lane(0, 26), 700]);
+  for (let step = 1; step <= 8; step += 1) {
+    const label = step >= 8 ? c.bold(c.yellow("FIGHT!")) : c.dim(countdown[step] ?? "");
+    frames.push([label, lane(step, 26 - step), step >= 6 ? 150 : 230]);
+  }
+  frames.push([c.bold(c.yellow("FIGHT!")), `${" ".repeat(9)}${cloud}${spark}${spark}${tri}`, 200]);
+  frames.push([c.bold(c.yellow("FIGHT!")), `${" ".repeat(9)}${cloud}${spark}${spark}${spark} ${c.dim("\u25b5\u25bf")}`, 220]);
+  frames.push([c.bold(c.green("K.O. \u2014 cloudflare wins")), `${" ".repeat(9)}${cloud}  ${spark}  ${c.dim("\u25bf \u00b4 ,")}`, 600]);
 
   if (!process.stdout.isTTY) {
-    process.stdout.write(render(frames[frames.length - 1]));
+    const last = frames[frames.length - 1];
+    process.stdout.write(render(last[0], last[1]));
     return;
   }
   process.stdout.write("\x1b[?25l"); // hide cursor
   for (let i = 0; i < frames.length; i += 1) {
     if (i > 0) process.stdout.write("\x1b[3A"); // move up 3 lines to redraw
-    process.stdout.write(`\x1b[J${render(frames[i])}`); // clear below + draw
-    await sleep(260);
+    process.stdout.write(`\x1b[J${render(frames[i][0], frames[i][1])}`);
+    await sleep(frames[i][2]);
   }
   process.stdout.write("\x1b[?25h"); // show cursor
   process.stdout.write(`  ${c.bold(c.orange("flarecel"))} ${c.dim(sym.dot)} ${c.dim("vercel vibes. cloudflare bills.")}\n`);

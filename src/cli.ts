@@ -25,7 +25,7 @@ import { explainIssue, listExplainableIds } from "./explain.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
 import { createFixChangeSet, createKitChangeSet, createRecipeChangeSet, listKits } from "./recipes.js";
 import { runVerify, runRuntimeCheck } from "./verify.js";
-import { setColorEnabled, startSpinner, splash, playVersus } from "./ui.js";
+import { setColorEnabled, c, startSpinner, splash, playVersus } from "./ui.js";
 import type { ChangeSet } from "./types.js";
 
 async function main(): Promise<void> {
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "help" || hasFlag(args, "help") || hasFlag(args, "h")) {
-    printHelp();
+    printHelp(hasFlag(args, "all") || hasFlag(args, "full"));
     return;
   }
 
@@ -316,62 +316,42 @@ async function handleChangeSet(cwd: string, args: ReturnType<typeof parseArgs>, 
   printChangeSet(changeSet);
 }
 
-function printHelp(): void {
+function printHelp(full = false): void {
   console.log(splash());
   console.log("");
-  console.log(`Agent-friendly Cloudflare Workers deployment assistant.
+  console.log(c.dim("Agent-friendly Cloudflare Workers deployment assistant."));
+  console.log("");
 
-Usage:
-  flarecel doctor [--json] [--cwd <path>]
-  flarecel doctor --fix [--apply --yes]
-  flarecel plan [--json]
-  flarecel fix [--dry-run] [--format patch]
-  flarecel fix --apply --yes
-  flarecel migrate vercel [--dry-run] [--format patch]
-  flarecel explain <issue-id> [--json]
-  flarecel add isr [--dry-run]
-  flarecel add stripe [--dry-run]
-  flarecel add resend [--dry-run]
-  flarecel kit saas [--dry-run] [--format patch]
-  flarecel kit ai-app [--dry-run] [--format patch]
-  flarecel kit realtime|creator|internal-tool [--dry-run]
-  flarecel add next-opennext [--dry-run] [--format patch]
-  flarecel add r2 uploads [--dry-run] [--format patch]
-  flarecel add db d1 --orm drizzle [--dry-run] [--format patch]
-  flarecel add db d1 --orm prisma [--dry-run]
-  flarecel add db neon --mode serverless|hyperdrive [--dry-run]
-  flarecel add db supabase --mode http|hyperdrive [--dry-run]
-  flarecel add db turso|planetscale|mongodb [--dry-run]
-  flarecel add auth better-auth --db d1 --orm drizzle [--dry-run]
-  flarecel add auth clerk|supabase|authjs|cloudflare-access [--dry-run]
-  flarecel add backend convex [--dry-run]
-  flarecel add redis upstash [--dry-run]
-  flarecel add kv cache [--dry-run] [--format patch]
-  flarecel add turnstile --form signup
-  flarecel add rate-limit --route /api/generate --limit 20/min
-  flarecel add cron daily-cleanup --schedule "0 0 * * *"
-  flarecel add workers-ai --model @cf/meta/llama-3.1-8b-instruct
-  flarecel add vectorize docs-search --dimensions 768 --metric cosine
-  flarecel add ai-gateway --provider openai
-  flarecel add observability --sampling 1
-  flarecel add durable-object room
-  flarecel add workflow onboarding --schedule "0 9 * * *"
-  flarecel add browser-run
-  flarecel add queue emails
-  flarecel verify [--json]
-  flarecel verify --runtime [--json]
-  flarecel provision [--json]
-  flarecel provision --apply --yes
-  flarecel cost [--json] [--requests 1000000] [--cpu-ms 7]
-  flarecel cost --compare vercel [--vercel-monthly-usd 200] [--json]
-  flarecel open
-  flarecel mcp
-  flarecel deploy --preview --yes
-  flarecel deploy --production --yes
+  // Grouped + color-coded so the surface is scannable, not a 50-line wall.
+  const groups: Array<{ title: string; paint: (s: string) => string; cmds: string[] }> = [
+    { title: "Diagnose", paint: c.cyan, cmds: ["doctor", "doctor --fix", "plan", "explain <id>", "verify", "cost"] },
+    { title: "Fix & migrate", paint: c.green, cmds: ["fix --dry-run", "fix --apply --yes", "migrate vercel"] },
+    { title: "Add features", paint: c.magenta, cmds: ["add r2 uploads", "add db d1 --orm drizzle", "add auth better-auth", "add isr", "add stripe", "add resend", "add <recipe>"] },
+    { title: "Kits", paint: c.yellow, cmds: ["kit saas", "kit ai-app", "kit realtime", "kit creator", "kit internal-tool"] },
+    { title: "Ship", paint: c.orange, cmds: ["provision", "deploy --preview --yes", "deploy --production --yes", "open", "mcp"] }
+  ];
 
-Agent loop:
-  doctor --json -> plan --json -> fix --dry-run --format patch -> fix --apply --yes -> verify --json -> cost --json -> deploy --preview --yes
-`);
+  for (const group of groups) {
+    console.log(`${c.bold(group.paint(group.title))}`);
+    for (const cmd of group.cmds) console.log(`  ${group.paint("flarecel " + cmd)}`);
+    console.log("");
+  }
+
+  console.log(`${c.dim("Global flags:")} ${c.gray("--json  --dry-run  --format patch  --yes  --no-color  --cwd <path>")}`);
+  console.log(`${c.dim("Agent loop:")}   ${c.gray("doctor \u2192 plan \u2192 fix --dry-run \u2192 fix --apply --yes \u2192 verify \u2192 deploy --preview")}`);
+
+  if (full) {
+    console.log("");
+    console.log(c.bold("All add recipes"));
+    for (const r of [
+      "next-opennext", "r2 uploads", "kv cache", "db d1 --orm prisma", "db neon|supabase|turso|planetscale|mongodb",
+      "auth clerk|supabase|authjs|cloudflare-access", "backend convex", "redis upstash", "turnstile --form signup",
+      "rate-limit --route /api/* --limit 20/min", "cron <name> --schedule \"0 0 * * *\"", "workers-ai", "vectorize <index>",
+      "ai-gateway --provider openai", "observability", "durable-object <name>", "workflow <name>", "browser-run", "queue <name>"
+    ]) console.log(`  ${c.magenta("flarecel add " + r)}`);
+  } else {
+    console.log(c.dim(`\nRun ${c.cyan("flarecel help --all")} for every recipe.`));
+  }
 }
 
 function fail(message: string): void {
