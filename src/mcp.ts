@@ -22,6 +22,13 @@ interface ToolCallParams {
   arguments?: Record<string, unknown>;
 }
 
+const MCP_PROMPTS = [
+  { name: "audit-readiness", description: "Guide the agent through a full Cloudflare readiness audit.", text: "Run `flarecel doctor --json`. For each blocking or high issue, run `flarecel explain <id>`. Then run `flarecel fix --dry-run --format patch` to preview fixes. Apply with `fix --apply --yes`, then verify with `flarecel verify --json`." },
+  { name: "migrate-from-vercel", description: "Migrate a Vercel Next.js app to Cloudflare Workers.", text: "Run `flarecel migrate vercel --dry-run --json` to see what translates and what is flagged. Apply the translation with `--apply --yes`. Then run `flarecel doctor --json` to check remaining issues. Use `flarecel add next-opennext --dry-run` for the OpenNext adapter." },
+  { name: "plan-saas-stack", description: "Plan a full SaaS stack on Cloudflare.", text: "Run `flarecel kit saas --dry-run --json` to preview the full stack (auth + D1 + R2 + queue + rate-limit + turnstile + observability). Review all files. Apply with `kit saas --apply --yes`. Then `flarecel provision --json` to see what Cloudflare resources need creating." },
+  { name: "explain-deploy-failure", description: "Diagnose a deploy or runtime error.", text: "Pipe the error into `flarecel diagnose` or pass it as an argument: `flarecel diagnose \"<error text>\" --json`. It maps errors to known issues and suggests fixes. Use `flarecel explain <issue-id>` for plain-language details." }
+];
+
 const TOOL_DEFINITIONS = [
   {
     name: "detect_project",
@@ -178,9 +185,9 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
       writeResult(request.id, {
         protocolVersion: "2025-06-18",
         capabilities: {
-          tools: {
-            listChanged: false
-          }
+          tools: { listChanged: false },
+          resources: { listChanged: false },
+          prompts: { listChanged: false }
         },
         serverInfo: {
           name: "flarecel",
@@ -199,6 +206,45 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
       const params = asObject(request.params) as ToolCallParams;
       const result = await callTool(params.name ?? "", asObject(params.arguments));
       writeResult(request.id, result);
+      return;
+    }
+
+    if (request.method === "resources/list") {
+      const resources = [
+        { uri: "file://wrangler.jsonc", name: "Wrangler config", mimeType: "application/json" },
+        { uri: "file://cloudflare-env.d.ts", name: "CloudflareEnv types", mimeType: "text/typescript" },
+        { uri: "file://package.json", name: "package.json", mimeType: "application/json" }
+      ];
+      writeResult(request.id, { resources });
+      return;
+    }
+
+    if (request.method === "resources/read") {
+      const params = asObject(request.params);
+      const uri = typeof params.uri === "string" ? params.uri : "";
+      const relativePath = uri.replace("file://", "");
+      const cwd = process.cwd();
+      try {
+        const { readFileSync } = await import("node:fs");
+        const content = readFileSync(path.join(cwd, relativePath), "utf8");
+        writeResult(request.id, { contents: [{ uri, text: content }] });
+      } catch {
+        writeError(request.id, -32602, `Cannot read resource: ${uri}`);
+      }
+      return;
+    }
+
+    if (request.method === "prompts/list") {
+      writeResult(request.id, { prompts: MCP_PROMPTS.map((p) => ({ name: p.name, description: p.description })) });
+      return;
+    }
+
+    if (request.method === "prompts/get") {
+      const params = asObject(request.params);
+      const name = typeof params.name === "string" ? params.name : "";
+      const prompt = MCP_PROMPTS.find((p) => p.name === name);
+      if (!prompt) { writeError(request.id, -32602, `Unknown prompt: ${name}`); return; }
+      writeResult(request.id, { messages: [{ role: "user", content: { type: "text", text: prompt.text } }] });
       return;
     }
 

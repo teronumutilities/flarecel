@@ -997,6 +997,296 @@ export async function sendEmail(
   };
 }
 
+function cloudflareImagesSpec(ctx: ProjectContext): IntegrationSpec {
+  return {
+    title: "Cloudflare Images",
+    deps: [],
+    wrangler: (config) => {
+      config.images = { binding: "IMAGES" };
+    },
+    files: [
+      {
+        path: () => nextLibPath(ctx, "image-loader.ts"),
+        reason: "Add a custom Next.js image loader for Cloudflare Images",
+        content: () => `// Custom loader for next/image on Cloudflare Workers.
+// Set this as the loader in next.config.ts: images: { loader: "custom", loaderFile: "./lib/image-loader.ts" }
+export default function cloudflareImageLoader({ src, width, quality }: { src: string; width: number; quality?: number }) {
+  const params = \`width=\${width},quality=\${quality || 75},format=auto\`;
+  return \`/cdn-cgi/image/\${params}/\${src}\`;
+}
+`
+      }
+    ],
+    envTypes: ["IMAGES: ImagesBinding;"],
+    warnings: [
+      "Add to next.config.ts: images: { loader: 'custom', loaderFile: './lib/image-loader.ts' }",
+      "Cloudflare Images must be enabled on your zone (Cloudflare dashboard > Images).",
+      "This resolves the 'next-image-on-workers' doctor warning."
+    ],
+    nextActions: ["Add the loader config to next.config.ts.", "flarecel verify --json"],
+    docPath: "docs/flarecel-cloudflare-images.md",
+    doc: integrationDoc("Cloudflare Images", "Adds an `IMAGES` binding and a custom Next.js image loader that routes through `/cdn-cgi/image/`. Resolves the next/image on Workers caveat.\n\nRequires: Images enabled on your Cloudflare zone.")
+  };
+}
+
+function hyperdriveSpec(ctx: ProjectContext): IntegrationSpec {
+  return {
+    title: "Hyperdrive (standalone)",
+    deps: ["pg"],
+    devDeps: ["@types/pg"],
+    wrangler: hyperdriveBinding,
+    envTypes: ["HYPERDRIVE: Hyperdrive;"],
+    files: [
+      {
+        path: () => nextLibPath(ctx, "hyperdrive.ts"),
+        reason: "Add a typed Hyperdrive Postgres client helper",
+        content: () => `import { Client } from "pg";
+
+export async function query(env: { HYPERDRIVE: { connectionString: string } }, sql: string, params?: unknown[]) {
+  const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
+  await client.connect();
+  try {
+    return await client.query(sql, params);
+  } finally {
+    await client.end();
+  }
+}
+`
+      }
+    ],
+    warnings: [
+      "Create the Hyperdrive config: wrangler hyperdrive create <name> --connection-string=\"postgres://...\"",
+      "Paste the returned ID into wrangler.jsonc. Requires nodejs_compat."
+    ],
+    nextActions: ["wrangler hyperdrive create my-db --connection-string=\"postgres://...\"", "Copy the Hyperdrive ID into wrangler.jsonc.", "flarecel verify --json"],
+    docPath: "docs/flarecel-hyperdrive.md",
+    doc: integrationDoc("Hyperdrive", "Standalone Hyperdrive recipe. Adds a `HYPERDRIVE` binding and a typed Postgres client helper using `pg`. Create the Hyperdrive config with `wrangler hyperdrive create` and paste the ID.")
+  };
+}
+
+function emailRoutingSpec(ctx: ProjectContext): IntegrationSpec {
+  return {
+    title: "Email Routing (Email Workers)",
+    deps: [],
+    files: [
+      {
+        path: () => "src/email-worker.ts",
+        reason: "Add an Email Worker receive handler",
+        content: () => `// Email Worker: receives inbound emails via Cloudflare Email Routing.
+// Configure in wrangler.jsonc and set up Email Routing rules in the Cloudflare dashboard.
+export default {
+  async email(message: EmailMessage, env: CloudflareEnv, ctx: ExecutionContext) {
+    // Example: forward all emails to an address.
+    await message.forward("admin@example.com");
+
+    // Or read the raw email:
+    // const raw = await new Response(message.raw).text();
+    // console.log(\`From: \${message.from}, To: \${message.to}, Size: \${message.rawSize}\`);
+  }
+} satisfies ExportedHandler<CloudflareEnv>;
+`
+      }
+    ],
+    warnings: [
+      "Email Workers require Email Routing to be enabled on your domain (Cloudflare dashboard > Email > Email Routing).",
+      "Add the email worker as a route rule in your Email Routing settings.",
+      "This is a SEPARATE worker entry from your main app — configure it in a dedicated wrangler config or as a service binding."
+    ],
+    docPath: "docs/flarecel-email-routing.md",
+    doc: integrationDoc("Email Routing (Email Workers)", "Generates an Email Worker handler that receives inbound emails via Cloudflare Email Routing. Supports `message.forward()` and raw email access.\n\nRequires: Email Routing enabled on your domain. Configure routing rules in the Cloudflare dashboard.")
+  };
+}
+
+async function sasBillingRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  const routePath = nextRoutePath(ctx, "stripe/webhook");
+  const checkoutPath = nextRoutePath(ctx, "stripe/checkout");
+  const schemaPath = nextDbPath(ctx, "billing-schema.ts");
+  const helperPath = nextLibPath(ctx, "billing.ts");
+
+  const changes = [
+    await packageJsonChange(ctx, "Add Stripe + Drizzle for SaaS billing", (pkg) => {
+      pkg.dependencies = pkg.dependencies ?? {};
+      pkg.dependencies["stripe"] = pkg.dependencies["stripe"] ?? depVersion("stripe");
+      pkg.dependencies["drizzle-orm"] = pkg.dependencies["drizzle-orm"] ?? depVersion("drizzle-orm");
+      pkg.devDependencies = pkg.devDependencies ?? {};
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
+    }),
+    await wranglerChange(ctx, "Ensure D1 binding for billing", (config) => {
+      config.d1_databases = upsertArrayObject(config.d1_databases, "binding", {
+        binding: "DB",
+        database_name: `${projectName(ctx)}-db`,
+        database_id: "replace-with-d1-database-id",
+        migrations_dir: "drizzle"
+      });
+    }),
+    await fileChange(ctx, schemaPath, billingSchema(), "Add billing/subscriptions schema"),
+    await fileChange(ctx, helperPath, billingHelper(), "Add entitlement helper"),
+    await fileChange(ctx, checkoutPath, billingCheckout(helperPath), "Add Stripe checkout session route"),
+    await fileChange(ctx, routePath, billingWebhook(schemaPath), "Add Stripe webhook with subscription handling (subsumes basic stripe recipe)"),
+    await appendEnvTypes(ctx, [
+      "DB: D1Database;",
+      "STRIPE_SECRET_KEY: string;",
+      "STRIPE_WEBHOOK_SECRET: string;",
+      "STRIPE_PRICE_ID: string;"
+    ], "Add SaaS billing env types"),
+    await appendLinesChange(ctx, ".dev.vars.example", [
+      "STRIPE_SECRET_KEY=sk_test_replace",
+      "STRIPE_WEBHOOK_SECRET=whsec_replace",
+      "STRIPE_PRICE_ID=price_replace"
+    ], "Document billing env values"),
+    await fileChange(ctx, "docs/flarecel-saas-billing.md", billingDoc(), "Explain SaaS billing recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add SaaS billing (Stripe + D1 entitlements)",
+    changes,
+    warnings: [
+      `EXPERIMENTAL recipe. Verified on ${VERIFIED_ON}.`,
+      "If you previously ran `add stripe`, this replaces the webhook route with a fuller subscription handler.",
+      "Create the D1 database and set Stripe secrets before production.",
+      "Does not run npm install or set remote secrets."
+    ],
+    nextActions: ["npm install", "wrangler secret put STRIPE_SECRET_KEY", "wrangler secret put STRIPE_WEBHOOK_SECRET", "npm run db:generate", "flarecel verify --json"]
+  };
+}
+
+function billingSchema(): string {
+  return `import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+
+export const subscriptions = sqliteTable("subscriptions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: text("user_id").notNull(),
+  stripeCustomerId: text("stripe_customer_id").notNull(),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  plan: text("plan").notNull().default("free"),
+  status: text("status").notNull().default("active"),
+  currentPeriodEnd: integer("current_period_end")
+});
+`;
+}
+
+function billingHelper(): string {
+  return `import { eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { subscriptions } from "../db/billing-schema.js";
+
+export function getBillingDb(env: { DB: D1Database }) {
+  return drizzle(env.DB, { schema: { subscriptions } });
+}
+
+export async function getUserPlan(env: { DB: D1Database }, userId: string) {
+  const db = getBillingDb(env);
+  const row = await db.select().from(subscriptions).where(eq(subscriptions.userId, userId)).get();
+  return row?.plan ?? "free";
+}
+
+export async function upsertSubscription(
+  env: { DB: D1Database },
+  data: { userId: string; stripeCustomerId: string; stripeSubscriptionId: string; plan: string; status: string; currentPeriodEnd: number }
+) {
+  const db = getBillingDb(env);
+  const existing = await db.select().from(subscriptions).where(eq(subscriptions.stripeCustomerId, data.stripeCustomerId)).get();
+  if (existing) {
+    await db.update(subscriptions).set(data).where(eq(subscriptions.id, existing.id));
+  } else {
+    await db.insert(subscriptions).values(data);
+  }
+}
+`;
+}
+
+function billingCheckout(helperPath: string): string {
+  return `import Stripe from "stripe";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+
+export async function POST(request: Request) {
+  const { env } = getCloudflareContext();
+  const stripe = new Stripe(env.STRIPE_SECRET_KEY, { httpClient: Stripe.createFetchHttpClient() });
+  const { userId } = await request.json() as { userId: string };
+
+  const session = await stripe.checkout.sessions.create({
+    mode: "subscription",
+    line_items: [{ price: env.STRIPE_PRICE_ID, quantity: 1 }],
+    success_url: new URL("/billing/success", request.url).toString(),
+    cancel_url: new URL("/billing/cancel", request.url).toString(),
+    metadata: { userId }
+  });
+
+  return Response.json({ url: session.url });
+}
+`;
+}
+
+function billingWebhook(schemaPath: string): string {
+  return `import Stripe from "stripe";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { upsertSubscription } from "../../../lib/billing.js";
+
+// Workers-safe webhook verification (async + SubtleCrypto).
+export async function POST(request: Request) {
+  const { env } = getCloudflareContext();
+  const stripe = new Stripe(env.STRIPE_SECRET_KEY, { httpClient: Stripe.createFetchHttpClient() });
+
+  const signature = request.headers.get("stripe-signature");
+  if (!signature) return new Response("Missing signature", { status: 400 });
+
+  let event: Stripe.Event;
+  try {
+    event = await stripe.webhooks.constructEventAsync(
+      await request.text(),
+      signature,
+      env.STRIPE_WEBHOOK_SECRET,
+      undefined,
+      Stripe.createSubtleCryptoProvider()
+    );
+  } catch (error) {
+    return new Response("Webhook verification failed", { status: 400 });
+  }
+
+  if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
+    const sub = event.data.object as Stripe.Subscription;
+    await upsertSubscription(env, {
+      userId: sub.metadata?.userId ?? "",
+      stripeCustomerId: sub.customer as string,
+      stripeSubscriptionId: sub.id,
+      plan: sub.items.data[0]?.price?.lookup_key ?? "pro",
+      status: sub.status,
+      currentPeriodEnd: sub.current_period_end
+    });
+  }
+
+  if (event.type === "customer.subscription.deleted") {
+    const sub = event.data.object as Stripe.Subscription;
+    await upsertSubscription(env, {
+      userId: sub.metadata?.userId ?? "",
+      stripeCustomerId: sub.customer as string,
+      stripeSubscriptionId: sub.id,
+      plan: "free",
+      status: "canceled",
+      currentPeriodEnd: sub.current_period_end
+    });
+  }
+
+  return Response.json({ received: true });
+}
+`;
+}
+
+function billingDoc(): string {
+  return integrationDoc("SaaS Billing (Stripe + D1)", `Opinionated billing module: Stripe Checkout + subscription webhooks + D1 entitlements.
+
+Generated files:
+- Checkout route (creates Stripe Checkout session)
+- Webhook route (handles subscription.created/updated/deleted, updates D1)
+- Billing schema (subscriptions table with plan/status/period)
+- Entitlement helper (getUserPlan, upsertSubscription)
+
+Env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID.
+
+If you previously ran \`flarecel add stripe\`, this replaces that webhook route with a fuller subscription handler.`);
+}
+
 function withTomlWarning(ctx: ProjectContext, changeSet: ChangeSet): ChangeSet {
   if (ctx.wrangler.format !== "toml") return changeSet;
   if (!changeSet.changes.some((change) => change.path === "wrangler.jsonc")) return changeSet;
@@ -1095,6 +1385,10 @@ async function resolveRecipeChangeSet(
   if (recipeName === "isr") return isrRecipe(ctx);
   if (recipeName === "stripe") return externalIntegrationRecipe(ctx, stripeSpec(ctx));
   if (recipeName === "resend") return externalIntegrationRecipe(ctx, resendSpec(ctx));
+  if (recipeName === "cloudflare-images" || recipeName === "images") return externalIntegrationRecipe(ctx, cloudflareImagesSpec(ctx));
+  if (recipeName === "hyperdrive") return externalIntegrationRecipe(ctx, hyperdriveSpec(ctx));
+  if (recipeName === "email-routing" || recipeName === "email") return externalIntegrationRecipe(ctx, emailRoutingSpec(ctx));
+  if (recipeName === "saas-billing") return sasBillingRecipe(ctx);
 
   if (recipeName === "auth") {
     const provider = options.positionals[0] ?? "";

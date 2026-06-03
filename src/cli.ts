@@ -22,6 +22,10 @@ import { createPlan } from "./plan.js";
 import { detectProject } from "./project.js";
 import { createVercelMigration } from "./migrate.js";
 import { explainIssue, listExplainableIds } from "./explain.js";
+import { saveBaseline, diffBaseline } from "./baseline.js";
+import { diagnoseError } from "./diagnose.js";
+import { writeManifest, createRemoveChangeSet, applyRemove } from "./manifest.js";
+import { whyFile } from "./why.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
 import { createFixChangeSet, createKitChangeSet, createRecipeChangeSet, listKits } from "./recipes.js";
 import { runVerify, runRuntimeCheck } from "./verify.js";
@@ -60,6 +64,24 @@ async function main(): Promise<void> {
       await runDoctorFix(cwd, ctx, args, report);
       return;
     }
+    if (hasFlag(args, "baseline")) {
+      const p = await saveBaseline(cwd, report);
+      if (hasFlag(args, "json")) printJson({ status: "saved", path: p });
+      else console.log(`Baseline saved to ${p}`);
+      return;
+    }
+    if (hasFlag(args, "diff")) {
+      const diff = await diffBaseline(cwd, report);
+      if (!diff) { fail("No baseline found. Run flarecel doctor --baseline first."); process.exitCode = 4; return; }
+      if (hasFlag(args, "json")) printJson(diff);
+      else {
+        console.log(`New issues: ${diff.new.length}`);
+        for (const i of diff.new) console.log(`  + [${i.severity}] ${i.title}`);
+        console.log(`Resolved: ${diff.resolved.length}`);
+        for (const i of diff.resolved) console.log(`  - ${i.title}`);
+      }
+      return;
+    }
     if (hasFlag(args, "json")) printJson(report);
     else printDoctor(report);
     process.exitCode = exitCodeForStatus(report.status);
@@ -93,7 +115,7 @@ async function main(): Promise<void> {
       positionals: args.positionals,
       flags: args.flags
     });
-    await handleChangeSet(cwd, args, changeSet);
+    await handleChangeSet(cwd, args, changeSet, recipeName);
     return;
   }
 
@@ -120,6 +142,52 @@ async function main(): Promise<void> {
       console.log(`What Flarecel changes: ${explanation.change}`);
       console.log(`Is it safe: ${explanation.safety}`);
       if (explanation.verifiedBy) console.log(`Confirm the fix: flarecel verify --json (check "${explanation.verifiedBy}")`);
+    }
+    return;
+  }
+
+  if (args.command === "diagnose") {
+    let text = args.positionals.join(" ");
+    if (!text && !process.stdin.isTTY) {
+      const chunks: Buffer[] = [];
+      for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+      text = Buffer.concat(chunks).toString("utf8");
+    }
+    if (!text) { fail("Provide error text as an argument, or pipe it via stdin."); process.exitCode = 4; return; }
+    const matches = diagnoseError(text);
+    if (hasFlag(args, "json")) printJson({ matches });
+    else if (matches.length === 0) console.log("No known patterns matched.");
+    else for (const m of matches) console.log(`${m.explanation}\n  → ${m.suggestion}\n`);
+    return;
+  }
+
+  if (args.command === "why") {
+    const filePath = args.positionals.shift();
+    if (!filePath) { fail("Usage: flarecel why <file-path>"); process.exitCode = 4; return; }
+    const result = whyFile(cwd, filePath);
+    if (hasFlag(args, "json")) printJson(result);
+    else if (result.sources.length === 0) console.log(`No recipe manifest found for ${filePath}. Run flarecel add <recipe> --apply --yes first.`);
+    else for (const s of result.sources) console.log(`${s.recipe} (${s.timestamp}): ${s.reason}`);
+    return;
+  }
+
+  if (args.command === "remove") {
+    const recipe = args.positionals.shift();
+    if (!recipe) { fail("Usage: flarecel remove <recipe>"); process.exitCode = 4; return; }
+    const result = await createRemoveChangeSet(cwd, recipe, hasFlag(args, "force"));
+    if (result.status === "not-found") { fail(`No manifest for "${recipe}". Only applied recipes can be removed.`); process.exitCode = 4; return; }
+    if (result.status === "refused") {
+      fail(`Files modified since apply. Use --force to revert anyway.`);
+      for (const c of result.conflicts) console.error(`  ${c.path} (changed)`);
+      process.exitCode = 5; return;
+    }
+    if (hasFlag(args, "apply") && hasFlag(args, "yes")) {
+      const applied = await applyRemove(cwd, result);
+      if (hasFlag(args, "json")) printJson(applied);
+      else console.log(`Removed ${recipe}: ${applied.changes.length} file(s) reverted.`);
+    } else {
+      if (hasFlag(args, "json")) printJson(result);
+      else { console.log(`Would revert ${result.changes.length} file(s) from ${recipe}.`); for (const c of result.changes) console.log(`  ${c.path}`); }
     }
     return;
   }
@@ -282,7 +350,7 @@ async function runDoctorFix(
   process.exitCode = exitCodeForStatus(verify.status);
 }
 
-async function handleChangeSet(cwd: string, args: ReturnType<typeof parseArgs>, changeSet: ChangeSet): Promise<void> {
+async function handleChangeSet(cwd: string, args: ReturnType<typeof parseArgs>, changeSet: ChangeSet, recipe?: string): Promise<void> {
   const wantsPatch = getFlag(args, "format") === "patch";
   const wantsApply = hasFlag(args, "apply");
 
@@ -301,6 +369,7 @@ async function handleChangeSet(cwd: string, args: ReturnType<typeof parseArgs>, 
 
   if (wantsApply) {
     const applied = await applyChangeSet(cwd, changeSet);
+    if (recipe && applied.status === "applied") await writeManifest(cwd, recipe, changeSet);
     if (hasFlag(args, "json")) printJson(applied);
     else printChangeSet(applied);
     return;
