@@ -149,31 +149,42 @@ export function splash(): string {
 }
 
 // Opt-in easter egg: the cloud and the triangle actually throw down.
-// Animated only on a TTY; otherwise prints the final frame once.
+// A 3-line scene redrawn in place each frame. Animated only on a TTY;
+// otherwise prints the final frame once.
 export async function playVersus(): Promise<void> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const cloud = c.orange("(~ cf ~)");
+  const W = 30;
+  const cloud = c.orange("(~cf~)");
   const tri = c.white("\u25b2");
   const spark = c.yellow("\u2726");
-  const frames = [
-    `${cloud}            ${tri}`,
-    `${cloud}        ${tri}`,
-    `${cloud}    ${tri}`,
-    `${cloud}${spark}${tri}`,
-    `${cloud} ${spark}${spark} ${c.dim("\u25b5 \u25bf")}`
+  const sky = (left: number, right: number) =>
+    " ".repeat(Math.max(0, left)) + cloud + " ".repeat(Math.max(1, right - left)) + tri;
+  // Each frame: [topLine, fightLine, groundLine]
+  const ground = c.gray("\u2500".repeat(W));
+  const finalFight = `${cloud} ${spark}${spark}${spark} ${c.dim("\u25bf")} ${c.green("K.O.")}`;
+  const frames: string[][] = [
+    [c.dim("cloudflare        vercel"), sky(0, 22), ground],
+    [c.dim("       face-off"), sky(4, 14), ground],
+    [c.dim("         clash"), sky(9, 4), ground],
+    ["", `${" ".repeat(11)}${cloud}${spark}${tri}`, ground],
+    ["", `${" ".repeat(11)}${cloud}${spark}${spark} ${c.dim("\u25b5\u25bf")}`, ground],
+    [c.bold(c.green("         winner")), `${" ".repeat(11)}${finalFight}`, ground]
   ];
-  const result = `${cloud}    ${c.green("cloudflare wins")}  ${c.dim("\u25bf \u00b4 ,")}`;
+
+  const render = (f: string[]) => `  ${f[0]}\n  ${f[1]}\n  ${f[2]}\n`;
 
   if (!process.stdout.isTTY) {
-    process.stdout.write(`${result}\n`);
+    process.stdout.write(render(frames[frames.length - 1]));
     return;
   }
-  process.stdout.write("\n");
-  for (const frame of frames) {
-    process.stdout.write(`\r\x1b[K  ${frame}`);
-    await sleep(220);
+  process.stdout.write("\x1b[?25l"); // hide cursor
+  for (let i = 0; i < frames.length; i += 1) {
+    if (i > 0) process.stdout.write("\x1b[3A"); // move up 3 lines to redraw
+    process.stdout.write(`\x1b[J${render(frames[i])}`); // clear below + draw
+    await sleep(260);
   }
-  process.stdout.write(`\r\x1b[K  ${result}\n`);
+  process.stdout.write("\x1b[?25h"); // show cursor
+  process.stdout.write(`  ${c.bold(c.orange("flarecel"))} ${c.dim(sym.dot)} ${c.dim("vercel vibes. cloudflare bills.")}\n`);
 }
 
 
