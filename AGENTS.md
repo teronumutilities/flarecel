@@ -24,7 +24,7 @@ Rules:
 - Use `flarecel mcp` when the host supports MCP stdio tools.
 - Run `npm test` after changing recipes, verifier logic, MCP tools, or provisioning behavior.
 - Prefer recipe commands over handwritten Cloudflare config when available, including `add db d1 --orm drizzle`, `add kv cache`, `add turnstile`, `add cron`, `add workers-ai`, `add vectorize`, `add ai-gateway`, `add observability`, `add durable-object`, `add workflow`, and `add browser-run`.
-- Prefer `kit saas` or `kit ai-app` to scaffold a full Cloudflare stack in one reviewable change set, then review every file before `--apply --yes`.
+- Prefer `kit saas`, `kit ai-app`, `kit realtime`, `kit creator`, or `kit internal-tool` to scaffold a full Cloudflare stack in one reviewable change set, then review every file before `--apply --yes`.
 - Third-party provider recipes (`auth clerk|supabase|authjs|cloudflare-access`, `db d1 --orm prisma`, `db supabase|neon|turso|planetscale|mongodb`, `backend convex`, `redis upstash`) are labeled experimental and generate Workers-safe client code; review the generated `docs/flarecel-*.md` and pin/verify versions before production.
 - Use `doctor --fix` to run doctor -> fix -> verify in one call (add `--apply --yes` to write).
 

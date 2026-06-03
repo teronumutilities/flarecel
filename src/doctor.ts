@@ -24,7 +24,7 @@ export function runDoctor(ctx: ProjectContext): DoctorReport {
       id: "unknown-framework",
       severity: "blocking",
       title: "Framework not recognized yet",
-      message: "This MVP supports detection for Next.js, Vite, Astro, Remix, SvelteKit, and Hono.",
+      message: "This MVP supports detection for Next.js, Vite, Astro, Remix, SvelteKit, Hono, and TanStack Start.",
       fixable: false
     }));
   }

@@ -98,9 +98,9 @@ Implemented now:
 - MVP recipes for OpenNext, R2 uploads, D1 + Drizzle, KV cache, Rate Limiting, Queues, Turnstile, Cron Triggers, Workers AI, Vectorize, AI Gateway, Observability, Durable Objects, Workflows, and Browser Run.
 - MVP Better Auth + D1 + Drizzle recipe.
 - Experimental third-party recipes (verified against provider + Cloudflare docs, 2026-06-04): `auth clerk`, `auth supabase`, `auth authjs`, `auth cloudflare-access`, `db d1 --orm prisma`, `db supabase`, `db neon`, `db turso`, `db planetscale`, `db mongodb`, `backend convex`, `redis upstash`. Each generates Workers-safe client code and is labeled experimental in its generated doc.
-- App kits (`kit saas`, `kit ai-app`) that compose multiple recipes into one reviewable change set.
+- App kits (`kit saas`, `kit ai-app`, `kit realtime`, `kit creator`, `kit internal-tool`) that compose multiple recipes into one reviewable change set.
 - `doctor --fix` to chain doctor -> fix -> verify in one call.
-- Pinned recipe dependency versions (caret ranges) instead of `latest`.
+- Pinned recipe dependency versions (caret ranges) instead of `latest`, with `npm run update-versions` to refresh safely and `npm run verify:providers` to type-check provider recipes against the real installed packages.
 - Provision planning from Wrangler bindings.
 - Cost estimation and gated preview/production deploy planning.
 - Stdio MCP server with tool discovery and tool calls.

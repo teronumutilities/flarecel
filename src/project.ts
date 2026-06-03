@@ -206,6 +206,7 @@ function detectFramework(dependencies: Record<string, string>): Framework {
   if (dependencies["@remix-run/node"] || dependencies["@remix-run/react"]) return "remix";
   if (dependencies["@sveltejs/kit"]) return "sveltekit";
   if (dependencies.hono) return "hono";
+  if (dependencies["@tanstack/react-start"] || dependencies["@tanstack/start"]) return "tanstack-start";
   if (dependencies.vite || dependencies["@vitejs/plugin-react"]) return "vite";
   return "unknown";
 }

@@ -11,10 +11,24 @@ const fixture = path.join(repoRoot, "fixtures", "next-basic");
 const tomlFixture = path.join(repoRoot, "fixtures", "next-toml");
 
 smokeKitSaasComposesAndApplies();
+smokeNewKits();
 smokeKitParity();
 smokeKitUnknownAndGating();
 smokeExitCodeThree();
 smokeTomlVerify();
+
+function smokeNewKits() {
+  for (const kit of ["realtime", "creator", "internal-tool"]) {
+    const result = run(["kit", kit, "--dry-run", "--json", "--cwd", fixture]);
+    assertEqual(result.status, 0, `kit ${kit}: ${result.stderr}`);
+    const changeSet = JSON.parse(result.stdout);
+    assertEqual(changeSet.status, "planned", `kit ${kit} should be planned`);
+    assertNoDuplicatePaths(changeSet);
+    assertGeneratedTypescriptParses(changeSet);
+    assertSingle(changeSet, "package.json");
+    assertSingle(changeSet, "wrangler.jsonc");
+  }
+}
 
 function smokeKitSaasComposesAndApplies() {
   const tmp = copyFixture("flarecel-kit-saas-");

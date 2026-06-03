@@ -24,7 +24,8 @@
     "smoke:providers": "npm run build && node scripts/smoke-providers.mjs",
     "test": "npm run smoke && npm run smoke:mcp && npm run smoke:auth && npm run smoke:recipes && npm run smoke:deploy-cost && npm run smoke:redact && npm run smoke:kit && npm run smoke:providers",
     "doctor": "node dist/cli.js doctor",
-    "update-versions": "node scripts/update-versions.mjs"
+    "update-versions": "node scripts/update-versions.mjs",
+    "verify:providers": "npm run build && node scripts/verify-providers.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.29",

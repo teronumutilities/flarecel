@@ -111,6 +111,35 @@ const KITS: Record<string, { title: string; recipes: KitRecipe[] }> = {
       { recipe: "rate-limit", positionals: [], flags: { route: "/api/*", limit: "30/min" } },
       { recipe: "observability", positionals: [], flags: { sampling: "1" } }
     ]
+  },
+  realtime: {
+    title: "Realtime Kit",
+    recipes: [
+      { recipe: "next-opennext", positionals: [], flags: {} },
+      { recipe: "durable-object", positionals: ["presence"], flags: {} },
+      { recipe: "kv", positionals: ["cache"], flags: {} },
+      { recipe: "observability", positionals: [], flags: { sampling: "1" } }
+    ]
+  },
+  creator: {
+    title: "Creator App Kit",
+    recipes: [
+      { recipe: "next-opennext", positionals: [], flags: {} },
+      { recipe: "auth", positionals: ["better-auth"], flags: { db: "d1", orm: "drizzle" } },
+      { recipe: "r2", positionals: ["uploads"], flags: {} },
+      { recipe: "turnstile", positionals: [], flags: { form: "signup" } },
+      { recipe: "rate-limit", positionals: [], flags: { route: "/api/*", limit: "30/min" } },
+      { recipe: "observability", positionals: [], flags: { sampling: "1" } }
+    ]
+  },
+  "internal-tool": {
+    title: "Internal Tool Kit",
+    recipes: [
+      { recipe: "next-opennext", positionals: [], flags: {} },
+      { recipe: "auth", positionals: ["cloudflare-access"], flags: {} },
+      { recipe: "db", positionals: ["d1"], flags: { orm: "drizzle" } },
+      { recipe: "observability", positionals: [], flags: { sampling: "1" } }
+    ]
   }
 };
 

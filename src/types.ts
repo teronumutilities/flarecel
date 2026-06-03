@@ -5,6 +5,7 @@ export type Framework =
   | "remix"
   | "sveltekit"
   | "hono"
+  | "tanstack-start"
   | "unknown";
 
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun" | "unknown";

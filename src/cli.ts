@@ -267,6 +267,7 @@ Usage:
   flarecel fix --apply --yes
   flarecel kit saas [--dry-run] [--format patch]
   flarecel kit ai-app [--dry-run] [--format patch]
+  flarecel kit realtime|creator|internal-tool [--dry-run]
   flarecel add next-opennext [--dry-run] [--format patch]
   flarecel add r2 uploads [--dry-run] [--format patch]
   flarecel add db d1 --orm drizzle [--dry-run] [--format patch]
