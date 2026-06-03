@@ -37,6 +37,11 @@ async function main(): Promise<void> {
   }
 
   if (args.command === "help" || hasFlag(args, "help") || hasFlag(args, "h")) {
+    // Bare `flarecel` in a real terminal: play the boot animation first.
+    if (process.argv.slice(2).length === 0 && process.stdout.isTTY) {
+      await playVersus();
+      console.log("");
+    }
     printHelp(hasFlag(args, "all") || hasFlag(args, "full"));
     return;
   }
