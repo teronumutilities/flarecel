@@ -138,14 +138,7 @@ export function label(text: string): string {
 // Boot splash: cloud (Cloudflare) facing off the triangle (Vercel). Static,
 // shown on the help screen. Color no-ops when disabled, so piped help is plain.
 export function splash(): string {
-  return [
-    `${c.orange("   .-~~~-.")}         ${c.dim("\u25b2")}`,
-    `${c.orange(" .(  cf   ).")}      ${c.dim("\u25b2 \u25b2")}`,
-    `${c.orange("(   cloud   )")}    ${c.dim("\u25b2\u25b2\u25b2\u25b2\u25b2")}`,
-    `${c.orange(" '~-.___.-~'")}    ${c.gray("\u203e\u203e\u203e\u203e\u203e\u203e\u203e")}`,
-    "",
-    `${c.bold(c.orange("flarecel"))}  ${c.dim(sym.dot)}  ${c.dim("vercel vibes. cloudflare bills.")}`
-  ].join("\n");
+  return `${c.bold(c.orange("flarecel"))}  ${c.dim(sym.dot)}  ${c.dim("vercel vibes. cloudflare bills.")}`;
 }
 
 // Boot animation: a big orange cloud and a small triangle approach each other,
@@ -211,12 +204,31 @@ export async function playVersus(): Promise<void> {
     await sleep(200);
   }
 
-  // They meet — hold a beat.
-  await sleep(400);
+  // EXPLOSION: expanding sparks where they collided, then fade.
+  const cx = 20; // center of collision
+  const explosionFrames = [
+    // tight burst
+    [" ", " ", `${" ".repeat(cx)}${c.yellow("\u2726")}`, " ", " "],
+    // expanding
+    [" ", `${" ".repeat(cx - 1)}${c.yellow("\u2726")} ${c.yellow("\u2726")}`, `${" ".repeat(cx - 2)}${c.orange("\u2734")} ${c.yellow("\u2726")} ${c.orange("\u2734")}`, `${" ".repeat(cx - 1)}${c.yellow("\u2726")} ${c.yellow("\u2726")}`, " "],
+    // big burst
+    [`${" ".repeat(cx - 2)}${c.yellow("*")}   ${c.yellow("*")}`, `${" ".repeat(cx - 3)}${c.orange("\u2726")}  ${c.yellow("\u2734")}  ${c.orange("\u2726")}`, `${" ".repeat(cx - 4)}${c.yellow(".")} ${c.orange("\u2726")} ${c.yellow("\u2726")} ${c.orange("\u2726")} ${c.yellow(".")}`, `${" ".repeat(cx - 3)}${c.orange("\u2726")}  ${c.yellow("\u2734")}  ${c.orange("\u2726")}`, `${" ".repeat(cx - 2)}${c.yellow("*")}   ${c.yellow("*")}`],
+    // fading
+    [`${" ".repeat(cx - 3)}${c.dim(".")}     ${c.dim(".")}`, `${" ".repeat(cx - 2)}${c.dim("\u2726")}   ${c.dim("\u2726")}`, `${" ".repeat(cx - 1)}${c.dim(".")} ${c.dim(".")}`, `${" ".repeat(cx - 2)}${c.dim("\u2726")}   ${c.dim("\u2726")}`, `${" ".repeat(cx - 3)}${c.dim(".")}     ${c.dim(".")}`],
+    // gone
+    [" ", " ", " ", " ", " "]
+  ];
 
-  // Vanish: clear the scene.
+  for (const ef of explosionFrames) {
+    process.stdout.write(`\x1b[${LINES}A\x1b[J`);
+    process.stdout.write(render(ef));
+    await sleep(150);
+  }
+
+  await sleep(200);
+
+  // Clear and show the wordmark.
   process.stdout.write(`\x1b[${LINES}A\x1b[J`);
-  await sleep(300);
 
   // Just the word, BIG, understated.
   const big = [
