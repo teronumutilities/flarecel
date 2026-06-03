@@ -135,6 +135,48 @@ export function label(text: string): string {
   return c.dim(`${text}:`);
 }
 
+// Boot splash: cloud (Cloudflare) facing off the triangle (Vercel). Static,
+// shown on the help screen. Color no-ops when disabled, so piped help is plain.
+export function splash(): string {
+  return [
+    `${c.orange("   .-~~~-.")}         ${c.dim("\u25b2")}`,
+    `${c.orange(" .(  cf   ).")}      ${c.dim("\u25b2 \u25b2")}`,
+    `${c.orange("(   cloud   )")}    ${c.dim("\u25b2\u25b2\u25b2\u25b2\u25b2")}`,
+    `${c.orange(" '~-.___.-~'")}    ${c.gray("\u203e\u203e\u203e\u203e\u203e\u203e\u203e")}`,
+    "",
+    `${c.bold(c.orange("flarecel"))}  ${c.dim(sym.dot)}  ${c.dim("vercel vibes. cloudflare bills.")}`
+  ].join("\n");
+}
+
+// Opt-in easter egg: the cloud and the triangle actually throw down.
+// Animated only on a TTY; otherwise prints the final frame once.
+export async function playVersus(): Promise<void> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const cloud = c.orange("(~ cf ~)");
+  const tri = c.white("\u25b2");
+  const spark = c.yellow("\u2726");
+  const frames = [
+    `${cloud}            ${tri}`,
+    `${cloud}        ${tri}`,
+    `${cloud}    ${tri}`,
+    `${cloud}${spark}${tri}`,
+    `${cloud} ${spark}${spark} ${c.dim("\u25b5 \u25bf")}`
+  ];
+  const result = `${cloud}    ${c.green("cloudflare wins")}  ${c.dim("\u25bf \u00b4 ,")}`;
+
+  if (!process.stdout.isTTY) {
+    process.stdout.write(`${result}\n`);
+    return;
+  }
+  process.stdout.write("\n");
+  for (const frame of frames) {
+    process.stdout.write(`\r\x1b[K  ${frame}`);
+    await sleep(220);
+  }
+  process.stdout.write(`\r\x1b[K  ${result}\n`);
+}
+
+
 export interface Spinner {
   stop: (finalLine?: string) => void;
 }

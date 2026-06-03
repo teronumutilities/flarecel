@@ -25,7 +25,7 @@ import { explainIssue, listExplainableIds } from "./explain.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
 import { createFixChangeSet, createKitChangeSet, createRecipeChangeSet, listKits } from "./recipes.js";
 import { runVerify, runRuntimeCheck } from "./verify.js";
-import { setColorEnabled, banner, startSpinner } from "./ui.js";
+import { setColorEnabled, startSpinner, splash, playVersus } from "./ui.js";
 import type { ChangeSet } from "./types.js";
 
 async function main(): Promise<void> {
@@ -38,6 +38,11 @@ async function main(): Promise<void> {
 
   if (args.command === "help" || hasFlag(args, "help") || hasFlag(args, "h")) {
     printHelp();
+    return;
+  }
+
+  if (args.command === "vs") {
+    await playVersus();
     return;
   }
 
@@ -312,7 +317,7 @@ async function handleChangeSet(cwd: string, args: ReturnType<typeof parseArgs>, 
 }
 
 function printHelp(): void {
-  console.log(banner("Vercel vibes. Cloudflare bills."));
+  console.log(splash());
   console.log("");
   console.log(`Agent-friendly Cloudflare Workers deployment assistant.
 
