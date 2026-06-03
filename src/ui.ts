@@ -189,10 +189,10 @@ export async function playVersus(): Promise<void> {
   // Non-TTY: just print the word big.
   if (!process.stdout.isTTY) {
     const big = [
-      " ___  _                          _ ",
-      "|  _|| |  __ _ _ _ ___ __ ___  | |",
-      "| |_ | | / _` | '_/ -_) _/ -_) | |",
-      "|_|  |_| \\__,_|_| \\___\\__\\___| |_|"
+      "\u2597\u2580\u2596\u259c                \u259c ",
+      "\u2590  \u2590 \u259d\u2580\u2596\u2599\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u2590 ",
+      "\u259c\u2580 \u2590 \u259e\u2580\u258c\u258c  \u259b\u2580 \u258c \u2596\u259b\u2580 \u2590 ",
+      "\u2590   \u2598\u259d\u2580\u2598\u2598  \u259d\u2580\u2598\u259d\u2580 \u259d\u2580\u2598 \u2598"
     ];
     process.stdout.write(`${big.map((l) => `  ${c.bold(c.orange(l))}`).join("\n")}\n`);
     return;
@@ -220,10 +220,10 @@ export async function playVersus(): Promise<void> {
 
   // Just the word, BIG, understated.
   const big = [
-    " ___  _                          _ ",
-    "|  _|| |  __ _ _ _ ___ __ ___  | |",
-    "| |_ | | / _` | '_/ -_) _/ -_) | |",
-    "|_|  |_| \\__,_|_| \\___\\__\\___| |_|"
+    "\u2597\u2580\u2596\u259c                \u259c ",
+    "\u2590  \u2590 \u259d\u2580\u2596\u2599\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u2590 ",
+    "\u259c\u2580 \u2590 \u259e\u2580\u258c\u258c  \u259b\u2580 \u258c \u2596\u259b\u2580 \u2590 ",
+    "\u2590   \u2598\u259d\u2580\u2598\u2598  \u259d\u2580\u2598\u259d\u2580 \u259d\u2580\u2598 \u2598"
   ];
   process.stdout.write(`\n${big.map((l) => `  ${c.bold(c.orange(l))}`).join("\n")}\n\n`);
   process.stdout.write("\x1b[?25h"); // show cursor
