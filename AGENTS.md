@@ -13,7 +13,7 @@ flarecel cost --json
 
 Rules:
 
-- Never parse human output if JSON is available.
+- Never parse human output if JSON is available. Human output may contain ANSI color; `--json`, `--format patch`, and `--no-color` are always color-free (color also auto-disables when output is piped or `NO_COLOR` is set).
 - Never deploy production without explicit user approval.
 - Never print secrets.
 - Prefer dry-run patches before writes.

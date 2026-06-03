@@ -25,10 +25,16 @@ import { explainIssue, listExplainableIds } from "./explain.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
 import { createFixChangeSet, createKitChangeSet, createRecipeChangeSet, listKits } from "./recipes.js";
 import { runVerify, runRuntimeCheck } from "./verify.js";
+import { setColorEnabled, banner } from "./ui.js";
 import type { ChangeSet } from "./types.js";
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  // Hard guard: never emit ANSI when an agent/machine is the consumer.
+  if (hasFlag(args, "no-color") || hasFlag(args, "json") || getFlag(args, "format") === "patch") {
+    setColorEnabled(false);
+  }
 
   if (args.command === "help" || hasFlag(args, "help") || hasFlag(args, "h")) {
     printHelp();
@@ -299,9 +305,9 @@ async function handleChangeSet(cwd: string, args: ReturnType<typeof parseArgs>, 
 }
 
 function printHelp(): void {
-  console.log(`Flarecel
-
-Agent-friendly Cloudflare Workers deployment assistant.
+  console.log(banner("Vercel vibes. Cloudflare bills."));
+  console.log("");
+  console.log(`Agent-friendly Cloudflare Workers deployment assistant.
 
 Usage:
   flarecel doctor [--json] [--cwd <path>]
