@@ -35,7 +35,7 @@ export interface WranglerInfo {
 
 export interface SourceRisk {
   file: string;
-  kind: "node-api-import" | "edge-runtime" | "next-on-pages-import";
+  kind: "node-api-import" | "edge-runtime" | "next-on-pages-import" | "next-image-import";
   value: string;
 }
 

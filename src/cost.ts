@@ -29,9 +29,19 @@ export interface CostReport {
   detectedBindings: string[];
   lineItems: CostLineItem[];
   estimatedMonthlyUsd: number;
+  vercelComparison?: VercelComparison;
   warnings: string[];
   sources: CostSource[];
   nextActions: string[];
+}
+
+export interface VercelComparison {
+  disclaimer: string;
+  vercelMonthlyUsd: number;
+  cloudflareMonthlyUsd: number;
+  monthlyDeltaUsd: number;
+  source: "model" | "user-provided";
+  assumptions: Record<string, number | string>;
 }
 
 const SOURCES: CostSource[] = [
@@ -212,8 +222,11 @@ export function createCostEstimate(
   }
 
   const compare = stringFlag(flags, "compare");
+  const cloudflareMonthlyUsd = roundUsd(lineItems.reduce((total, item) => total + item.estimatedUsd, 0));
+  let vercelComparison: VercelComparison | undefined;
   if (compare === "vercel") {
-    warnings.push("Vercel comparison is not estimated in this MVP. Add a --vercel-monthly-usd value or compare against your actual Vercel bill.");
+    vercelComparison = buildVercelComparison(flags, cloudflareMonthlyUsd);
+    warnings.push(vercelComparison.disclaimer);
   }
 
   return {
@@ -258,12 +271,52 @@ export function createCostEstimate(
     detectedBindings,
     lineItems: lineItems.filter((item) => item.usage > 0 || item.estimatedUsd > 0 || item.id === "workers-paid-subscription"),
     estimatedMonthlyUsd: roundUsd(lineItems.reduce((total, item) => total + item.estimatedUsd, 0)),
+    vercelComparison,
     warnings,
     sources: SOURCES,
     nextActions: [
       "Adjust usage flags for your expected traffic.",
       "Run flarecel deploy --preview --yes before production."
     ]
+  };
+}
+
+const VERCEL_DISCLAIMER =
+  "EXPERIMENTAL estimate, not a quote. Vercel and Cloudflare bills depend on real usage, regions, and plan changes. Use each provider's own calculator before making decisions.";
+
+function buildVercelComparison(
+  flags: Record<string, string | boolean>,
+  cloudflareMonthlyUsd: number
+): VercelComparison {
+  const override = numberFlag(flags, "vercel-monthly-usd", -1);
+  if (override >= 0) {
+    return {
+      disclaimer: VERCEL_DISCLAIMER,
+      vercelMonthlyUsd: roundUsd(override),
+      cloudflareMonthlyUsd,
+      monthlyDeltaUsd: roundUsd(override - cloudflareMonthlyUsd),
+      source: "user-provided",
+      assumptions: { "vercel-monthly-usd": roundUsd(override) }
+    };
+  }
+
+  // Labeled Vercel Pro model: $20/seat/month. Metered usage assumed within plan.
+  const seats = numberFlag(flags, "vercel-seats", 1);
+  const seatUsd = 20;
+  const vercelMonthlyUsd = roundUsd(seats * seatUsd);
+
+  return {
+    disclaimer: VERCEL_DISCLAIMER,
+    vercelMonthlyUsd,
+    cloudflareMonthlyUsd,
+    monthlyDeltaUsd: roundUsd(vercelMonthlyUsd - cloudflareMonthlyUsd),
+    source: "model",
+    assumptions: {
+      "vercel-plan": "Pro",
+      "vercel-seats": seats,
+      "vercel-seat-usd": seatUsd,
+      note: "Seat fee only; included usage assumed to cover metered usage. Pass --vercel-monthly-usd to use your real bill."
+    }
   };
 }
 

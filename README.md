@@ -100,6 +100,11 @@ Implemented now:
 - Experimental third-party recipes (verified against provider + Cloudflare docs, 2026-06-04): `auth clerk`, `auth supabase`, `auth authjs`, `auth cloudflare-access`, `db d1 --orm prisma`, `db supabase`, `db neon`, `db turso`, `db planetscale`, `db mongodb`, `backend convex`, `redis upstash`. Each generates Workers-safe client code and is labeled experimental in its generated doc.
 - App kits (`kit saas`, `kit ai-app`, `kit realtime`, `kit creator`, `kit internal-tool`) that compose multiple recipes into one reviewable change set.
 - `doctor --fix` to chain doctor -> fix -> verify in one call.
+- `migrate vercel` to translate `vercel.json` (redirects, headers, crons) and `.env` key names into Cloudflare equivalents, flagging what does not port.
+- `explain <issue-id>` for plain-language explanations of doctor findings.
+- `cost --compare vercel` (experimental, estimate-only) with a `--vercel-monthly-usd` override.
+- Experimental `add isr` (OpenNext R2 incremental cache), `add stripe` (Workers-safe webhook), and `add resend` recipes.
+- Opt-in `verify --runtime` / `npm run verify:runtime` that boots the built worker in workerd (miniflare).
 - Pinned recipe dependency versions (caret ranges) instead of `latest`, with `npm run update-versions` to refresh safely and `npm run verify:providers` to type-check provider recipes against the real installed packages.
 - Provision planning from Wrangler bindings.
 - Cost estimation and gated preview/production deploy planning.

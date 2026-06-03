@@ -239,7 +239,10 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
         { name: "db planetscale", maturity: "experimental", writesFiles: true },
         { name: "db mongodb", maturity: "experimental", writesFiles: true },
         { name: "backend convex", maturity: "experimental", writesFiles: true },
-        { name: "redis upstash", maturity: "experimental", writesFiles: true }
+        { name: "redis upstash", maturity: "experimental", writesFiles: true },
+        { name: "isr", maturity: "experimental", writesFiles: true },
+        { name: "stripe", maturity: "experimental", writesFiles: true },
+        { name: "resend", maturity: "experimental", writesFiles: true }
       ]
     });
   }

@@ -1,5 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ProjectContext, VerifyCheck, VerifyReport } from "./types.js";
 import { runDoctor } from "./doctor.js";
 
@@ -64,9 +66,10 @@ export function runVerify(ctx: ProjectContext): VerifyReport {
   addCloudflareBindingChecks(ctx, checks);
 
   for (const risk of ctx.sourceRisks) {
+    const soft = (risk.kind === "node-api-import" && risk.value === "fs") || risk.kind === "next-image-import";
     checks.push({
       id: `source-risk-${risk.kind}`,
-      status: risk.kind === "node-api-import" && risk.value === "fs" ? "warning" : "failed",
+      status: soft ? "warning" : "failed",
       message: `${risk.file}: ${risk.value}`
     });
   }
@@ -419,6 +422,31 @@ function aiGatewayCandidates(): string[] {
 
 function findFirstExisting(ctx: ProjectContext, relativePaths: string[]): string | null {
   return relativePaths.find((relativePath) => existsSync(path.join(ctx.cwd, relativePath))) ?? null;
+}
+
+// Opt-in: boots the built worker in workerd via scripts/verify-runtime.mjs.
+// Returns a VerifyCheck; degrades to a warning if skipped (no build / no miniflare).
+export function runRuntimeCheck(ctx: ProjectContext): VerifyCheck {
+  const scriptPath = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "scripts", "verify-runtime.mjs");
+  if (!existsSync(scriptPath)) {
+    return { id: "runtime-boot", status: "warning", message: "Runtime script not found (scripts/verify-runtime.mjs)." };
+  }
+
+  const result = spawnSync(process.execPath, [scriptPath, "--cwd", ctx.cwd], { encoding: "utf8" });
+  let parsed: { status?: string; reason?: string; bootMs?: number; httpStatus?: number } = {};
+  try {
+    parsed = JSON.parse(result.stdout || "{}");
+  } catch {
+    return { id: "runtime-boot", status: "failed", message: result.stderr?.trim() || "Runtime check produced no parseable output." };
+  }
+
+  if (parsed.status === "passed") {
+    return { id: "runtime-boot", status: "passed", message: `Worker booted in ${parsed.bootMs}ms (HTTP ${parsed.httpStatus}).` };
+  }
+  if (parsed.status === "skipped") {
+    return { id: "runtime-boot", status: "warning", message: parsed.reason ?? "Runtime check skipped." };
+  }
+  return { id: "runtime-boot", status: "failed", message: parsed.reason ?? "Worker failed to boot." };
 }
 
 function objectArray(value: unknown): Array<Record<string, unknown>> {

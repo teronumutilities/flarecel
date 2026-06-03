@@ -20,9 +20,11 @@ import {
 import { applyChangeSet, renderPatch } from "./patches.js";
 import { createPlan } from "./plan.js";
 import { detectProject } from "./project.js";
+import { createVercelMigration } from "./migrate.js";
+import { explainIssue, listExplainableIds } from "./explain.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
 import { createFixChangeSet, createKitChangeSet, createRecipeChangeSet, listKits } from "./recipes.js";
-import { runVerify } from "./verify.js";
+import { runVerify, runRuntimeCheck } from "./verify.js";
 import type { ChangeSet } from "./types.js";
 
 async function main(): Promise<void> {
@@ -79,6 +81,45 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (args.command === "explain") {
+    const id = args.positionals.shift();
+    if (!id) {
+      if (hasFlag(args, "json")) printJson({ ids: listExplainableIds() });
+      else console.log(`Usage: flarecel explain <issue-id>\nKnown ids: ${listExplainableIds().join(", ")}`);
+      return;
+    }
+    const explanation = explainIssue(id);
+    if (!explanation) {
+      fail(`No explanation for "${id}". Run flarecel doctor --json to see issue ids.`);
+      process.exitCode = 4;
+      return;
+    }
+    if (hasFlag(args, "json")) {
+      printJson(explanation);
+    } else {
+      console.log(`Flarecel — ${explanation.id}`);
+      console.log("");
+      console.log(`What this is: ${explanation.what}`);
+      console.log(`Why it matters: ${explanation.why}`);
+      console.log(`What Flarecel changes: ${explanation.change}`);
+      console.log(`Is it safe: ${explanation.safety}`);
+      if (explanation.verifiedBy) console.log(`Confirm the fix: flarecel verify --json (check "${explanation.verifiedBy}")`);
+    }
+    return;
+  }
+
+  if (args.command === "migrate") {
+    const target = args.positionals.shift();
+    if (target !== "vercel") {
+      fail("Only `flarecel migrate vercel` is supported.");
+      process.exitCode = 4;
+      return;
+    }
+    const changeSet = await createVercelMigration(ctx);
+    await handleChangeSet(cwd, args, changeSet);
+    return;
+  }
+
   if (args.command === "kit") {
     const kitName = args.positionals.shift();
     if (!kitName) {
@@ -93,6 +134,9 @@ async function main(): Promise<void> {
 
   if (args.command === "verify") {
     const report = runVerify(ctx);
+    if (hasFlag(args, "runtime")) {
+      report.checks.push(runRuntimeCheck(ctx));
+    }
     if (hasFlag(args, "json")) printJson(report);
     else printVerify(report);
     process.exitCode = exitCodeForStatus(report.status);
@@ -265,6 +309,11 @@ Usage:
   flarecel plan [--json]
   flarecel fix [--dry-run] [--format patch]
   flarecel fix --apply --yes
+  flarecel migrate vercel [--dry-run] [--format patch]
+  flarecel explain <issue-id> [--json]
+  flarecel add isr [--dry-run]
+  flarecel add stripe [--dry-run]
+  flarecel add resend [--dry-run]
   flarecel kit saas [--dry-run] [--format patch]
   flarecel kit ai-app [--dry-run] [--format patch]
   flarecel kit realtime|creator|internal-tool [--dry-run]
@@ -292,9 +341,11 @@ Usage:
   flarecel add browser-run
   flarecel add queue emails
   flarecel verify [--json]
+  flarecel verify --runtime [--json]
   flarecel provision [--json]
   flarecel provision --apply --yes
   flarecel cost [--json] [--requests 1000000] [--cpu-ms 7]
+  flarecel cost --compare vercel [--vercel-monthly-usd 200] [--json]
   flarecel open
   flarecel mcp
   flarecel deploy --preview --yes

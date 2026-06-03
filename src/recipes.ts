@@ -34,7 +34,9 @@ const DEP_VERSIONS: Record<string, string> = {
   "convex": "^1.40.0",
   "@upstash/redis": "^1.38.0",
   "pg": "^8.21.0",
-  "@types/pg": "^8.20.0"
+  "@types/pg": "^8.20.0",
+  "stripe": "^22.2.0",
+  "resend": "^6.12.4"
 };
 
 const VERIFIED_ON = "2026-06-04";
@@ -886,6 +888,115 @@ export function createRedis(env: { UPSTASH_REDIS_REST_URL: string; UPSTASH_REDIS
   };
 }
 
+function stripeSpec(ctx: ProjectContext): IntegrationSpec {
+  const routePath = nextRoutePath(ctx, "stripe/webhook");
+  return {
+    title: "Stripe webhooks",
+    deps: ["stripe"],
+    envTypes: ["STRIPE_SECRET_KEY: string;", "STRIPE_WEBHOOK_SECRET: string;"],
+    envExample: ["STRIPE_SECRET_KEY=sk_test_replace", "STRIPE_WEBHOOK_SECRET=whsec_replace"],
+    files: [
+      {
+        path: () => routePath,
+        reason: "Add Workers-safe Stripe webhook route (async signature verification)",
+        content: () => `import Stripe from "stripe";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
+
+// On Cloudflare Workers, signatures MUST be verified with the async API backed
+// by Web Crypto. The synchronous constructEvent() does not work on Workers.
+export async function POST(request: Request) {
+  const { env } = getCloudflareContext();
+  const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
+    httpClient: Stripe.createFetchHttpClient()
+  });
+
+  const signature = request.headers.get("stripe-signature");
+  if (!signature) return new Response("Missing signature", { status: 400 });
+
+  const payload = await request.text();
+  let event: Stripe.Event;
+  try {
+    event = await stripe.webhooks.constructEventAsync(
+      payload,
+      signature,
+      env.STRIPE_WEBHOOK_SECRET,
+      undefined,
+      Stripe.createSubtleCryptoProvider()
+    );
+  } catch (error) {
+    return new Response(\`Webhook signature verification failed: \${error instanceof Error ? error.message : "unknown"}\`, { status: 400 });
+  }
+
+  // Return fast. For heavy work, enqueue to a Cloudflare Queue (flarecel add queue)
+  // and process in the consumer so Stripe's delivery does not time out.
+  switch (event.type) {
+    case "checkout.session.completed":
+      // handle fulfilment
+      break;
+    default:
+      break;
+  }
+
+  return Response.json({ received: true });
+}
+`
+      }
+    ],
+    warnings: [
+      "Stripe webhook verification on Workers requires the async API (constructEventAsync + Stripe.createSubtleCryptoProvider()); the synchronous constructEvent() will not work.",
+      "For heavy webhook processing, run `flarecel add queue` and enqueue events so the webhook returns before Stripe times out.",
+      "Set STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET as Wrangler secrets in production."
+    ],
+    nextActions: ["npm install", "wrangler secret put STRIPE_SECRET_KEY", "wrangler secret put STRIPE_WEBHOOK_SECRET", "flarecel verify --json"],
+    docPath: "docs/flarecel-stripe.md",
+    doc: integrationDoc("Stripe webhooks", `Package: \`stripe\`. Route: \`${routePath}\`.
+
+On Cloudflare Workers you must verify signatures with the async API:
+
+\`\`\`ts
+const stripe = new Stripe(env.STRIPE_SECRET_KEY, { httpClient: Stripe.createFetchHttpClient() });
+const event = await stripe.webhooks.constructEventAsync(payload, sig, env.STRIPE_WEBHOOK_SECRET, undefined, Stripe.createSubtleCryptoProvider());
+\`\`\`
+
+Env: \`STRIPE_SECRET_KEY\`, \`STRIPE_WEBHOOK_SECRET\`. For durable processing, pair with \`flarecel add queue\` and enqueue events from the webhook.`)
+  };
+}
+
+function resendSpec(ctx: ProjectContext): IntegrationSpec {
+  return {
+    title: "Resend email",
+    deps: ["resend"],
+    envTypes: ["RESEND_API_KEY: string;"],
+    envExample: ["RESEND_API_KEY=re_replace"],
+    files: [
+      {
+        path: () => nextLibPath(ctx, "email.ts"),
+        reason: "Add Resend email helper",
+        content: () => `import { Resend } from "resend";
+
+export function createResend(env: { RESEND_API_KEY: string }) {
+  return new Resend(env.RESEND_API_KEY);
+}
+
+export async function sendEmail(
+  env: { RESEND_API_KEY: string },
+  options: { from: string; to: string | string[]; subject: string; html: string }
+) {
+  const resend = createResend(env);
+  const { data, error } = await resend.emails.send(options);
+  if (error) throw new Error(error.message);
+  return data;
+}
+`
+      }
+    ],
+    warnings: ["Resend is a fetch-based REST SDK and works on Workers. Set RESEND_API_KEY as a Wrangler secret; verify your sending domain in Resend."],
+    nextActions: ["npm install", "wrangler secret put RESEND_API_KEY", "flarecel verify --json"],
+    docPath: "docs/flarecel-resend.md",
+    doc: integrationDoc("Resend email", "Uses `resend`. Helper: `lib/email.ts` (`new Resend(env.RESEND_API_KEY)` -> `resend.emails.send(...)`). Env: `RESEND_API_KEY`. Fetch-based REST, Workers-safe.")
+  };
+}
+
 function withTomlWarning(ctx: ProjectContext, changeSet: ChangeSet): ChangeSet {
   if (ctx.wrangler.format !== "toml") return changeSet;
   if (!changeSet.changes.some((change) => change.path === "wrangler.jsonc")) return changeSet;
@@ -980,6 +1091,10 @@ async function resolveRecipeChangeSet(
     const queueName = options.positionals[0] ?? "jobs";
     return queueRecipe(ctx, queueName);
   }
+
+  if (recipeName === "isr") return isrRecipe(ctx);
+  if (recipeName === "stripe") return externalIntegrationRecipe(ctx, stripeSpec(ctx));
+  if (recipeName === "resend") return externalIntegrationRecipe(ctx, resendSpec(ctx));
 
   if (recipeName === "auth") {
     const provider = options.positionals[0] ?? "";
@@ -2099,6 +2214,91 @@ function openNextConfig(): string {
 
 export default defineCloudflareConfig({});
 `;
+}
+
+// ISR / incremental cache (verified against opennext.js.org/cloudflare/caching, small-site combo).
+async function isrRecipe(ctx: ProjectContext): Promise<ChangeSet> {
+  if (ctx.framework !== "nextjs") {
+    return {
+      status: "error",
+      title: "ISR cache requires a Next.js project",
+      changes: [],
+      warnings: [`Detected framework: ${ctx.framework}. OpenNext incremental cache applies to Next.js.`],
+      nextActions: ["flarecel doctor --json"]
+    };
+  }
+
+  const bucket = `${projectName(ctx)}-inc-cache`;
+  const database = `${projectName(ctx)}-tag-cache`;
+
+  const changes = [
+    await fileChange(ctx, "open-next.config.ts", isrOpenNextConfig(), "Enable R2 incremental cache, DO queue, and D1 tag cache for ISR"),
+    await wranglerChange(ctx, "Add ISR cache bindings (R2 + DO queue + D1 tag cache)", (config) => {
+      config.r2_buckets = upsertArrayObject(config.r2_buckets, "binding", {
+        binding: "NEXT_INC_CACHE_R2_BUCKET",
+        bucket_name: bucket
+      });
+      const durableObjects = asObject(config.durable_objects);
+      durableObjects.bindings = upsertArrayObject(durableObjects.bindings, "name", {
+        name: "NEXT_CACHE_DO_QUEUE",
+        class_name: "DOQueueHandler"
+      });
+      config.durable_objects = durableObjects;
+      config.migrations = upsertDurableObjectMigration(config.migrations, "v1-isr-cache", "DOQueueHandler");
+      config.d1_databases = upsertArrayObject(config.d1_databases, "binding", {
+        binding: "NEXT_TAG_CACHE_D1",
+        database_name: database,
+        database_id: "replace-with-d1-database-id"
+      });
+      config.services = upsertArrayObject(config.services, "binding", {
+        binding: "WORKER_SELF_REFERENCE",
+        service: String(config.name ?? projectName(ctx))
+      });
+    }),
+    await fileChange(ctx, "docs/flarecel-isr.md", isrDoc(bucket, database), "Explain the ISR cache recipe")
+  ].filter((change) => change.before !== change.after);
+
+  return {
+    status: "planned",
+    title: "Add OpenNext ISR incremental cache",
+    changes,
+    warnings: [
+      "Requires the OpenNext adapter (run `flarecel add next-opennext` first if missing).",
+      "Create the R2 bucket and D1 database before deploy, and copy the D1 database_id into wrangler.jsonc.",
+      "The D1 tag cache is only needed for on-demand revalidation (revalidateTag/revalidatePath)."
+    ],
+    nextActions: [
+      `wrangler r2 bucket create ${bucket}`,
+      `wrangler d1 create ${database}`,
+      "Copy the returned database_id into wrangler.jsonc.",
+      "npm run cf-typegen",
+      "flarecel verify --json"
+    ]
+  };
+}
+
+function isrOpenNextConfig(): string {
+  return `import { defineCloudflareConfig } from "@opennextjs/cloudflare";
+import r2IncrementalCache from "@opennextjs/cloudflare/overrides/incremental-cache/r2-incremental-cache";
+import doQueue from "@opennextjs/cloudflare/overrides/queue/do-queue";
+import d1NextTagCache from "@opennextjs/cloudflare/overrides/tag-cache/d1-next-tag-cache";
+
+export default defineCloudflareConfig({
+  incrementalCache: r2IncrementalCache,
+  queue: doQueue,
+  tagCache: d1NextTagCache
+});
+`;
+}
+
+function isrDoc(bucket: string, database: string): string {
+  return integrationDoc("OpenNext ISR incremental cache", `Wires Next.js ISR/revalidation on Cloudflare using the OpenNext small-site combo:
+
+- R2 incremental cache (\`NEXT_INC_CACHE_R2_BUCKET\` -> \`${bucket}\`)
+- Durable Object revalidation queue (\`NEXT_CACHE_DO_QUEUE\`, class \`DOQueueHandler\`)
+- D1 tag cache (\`NEXT_TAG_CACHE_D1\` -> \`${database}\`, only for on-demand revalidation)
+
+Verified against opennext.js.org/cloudflare/caching. Create the R2 bucket and D1 database, then copy the database_id into wrangler.jsonc before deploy.`);
 }
 
 function r2UploadRoute(binding: string): string {

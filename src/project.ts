@@ -214,6 +214,7 @@ function detectFramework(dependencies: Record<string, string>): Framework {
 async function scanSourceRisks(cwd: string): Promise<SourceRisk[]> {
   const files = await collectSourceFiles(cwd);
   const risks: SourceRisk[] = [];
+  let flaggedNextImage = false;
   const nodeApiPatterns = [
     "child_process",
     "cluster",
@@ -233,6 +234,11 @@ async function scanSourceRisks(cwd: string): Promise<SourceRisk[]> {
 
     if (content.includes("@cloudflare/next-on-pages")) {
       risks.push({ file, kind: "next-on-pages-import", value: "@cloudflare/next-on-pages" });
+    }
+
+    if (!flaggedNextImage && /from\s+["']next\/image["']/.test(content)) {
+      risks.push({ file, kind: "next-image-import", value: "next/image" });
+      flaggedNextImage = true;
     }
 
     for (const api of nodeApiPatterns) {

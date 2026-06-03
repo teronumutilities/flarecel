@@ -37,7 +37,9 @@ const PROVIDERS = [
   ["db-planetscale", ["add", "db", "planetscale"]],
   ["db-mongodb", ["add", "db", "mongodb"]],
   ["backend-convex", ["add", "backend", "convex"]],
-  ["redis-upstash", ["add", "redis", "upstash"]]
+  ["redis-upstash", ["add", "redis", "upstash"]],
+  ["stripe", ["add", "stripe"]],
+  ["resend", ["add", "resend"]]
 ].filter(([key]) => !filter || key.includes(filter));
 
 const baseline = depNames(JSON.parse(readFileSync(path.join(fixture, "package.json"), "utf8")));

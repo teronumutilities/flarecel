@@ -27,6 +27,10 @@ Rules:
 - Prefer `kit saas`, `kit ai-app`, `kit realtime`, `kit creator`, or `kit internal-tool` to scaffold a full Cloudflare stack in one reviewable change set, then review every file before `--apply --yes`.
 - Third-party provider recipes (`auth clerk|supabase|authjs|cloudflare-access`, `db d1 --orm prisma`, `db supabase|neon|turso|planetscale|mongodb`, `backend convex`, `redis upstash`) are labeled experimental and generate Workers-safe client code; review the generated `docs/flarecel-*.md` and pin/verify versions before production.
 - Use `doctor --fix` to run doctor -> fix -> verify in one call (add `--apply --yes` to write).
+- Use `migrate vercel` to translate an existing `vercel.json` and `.env` key names to Cloudflare; review FLAG warnings for anything that does not port automatically.
+- Use `explain <issue-id>` for a plain-language description of any doctor finding.
+- Treat `cost --compare vercel` as a labeled estimate only (never a quote); it always emits a disclaimer.
+- `verify --runtime` is opt-in and boots the built worker in workerd; it is not part of `npm test`.
 
 Exit codes (every command):
 

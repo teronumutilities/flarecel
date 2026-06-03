@@ -234,6 +234,17 @@ function checkSourceRisks(ctx: ProjectContext, issues: Issue[]): void {
       }));
     }
 
+    if (risk.kind === "next-image-import") {
+      issues.push(issue({
+        id: "next-image-on-workers",
+        severity: "warning",
+        title: "next/image used on Cloudflare Workers",
+        message: "Default Next.js image optimization may not run as on Vercel; the Worker does not sit in front of static assets. Use Cloudflare Images, a custom loader, or unoptimized images.",
+        file: risk.file,
+        fixable: false
+      }));
+    }
+
     if (risk.kind === "node-api-import") {
       issues.push(issue({
         id: `node-api-import-${risk.value}`,

@@ -122,6 +122,16 @@ export function printCost(report: CostReport): void {
     console.log(`  ${item.usage} ${item.unit}; billable ${item.billable}`);
   }
 
+  if (report.vercelComparison) {
+    const v = report.vercelComparison;
+    const cheaper = v.monthlyDeltaUsd >= 0 ? "cheaper on Cloudflare" : "cheaper on Vercel";
+    console.log("");
+    console.log("Vercel comparison (EXPERIMENTAL):");
+    console.log(`  ${v.disclaimer}`);
+    console.log(`  Vercel (${v.source}): $${v.vercelMonthlyUsd.toFixed(2)} / Cloudflare: $${v.cloudflareMonthlyUsd.toFixed(2)}`);
+    console.log(`  Delta: $${Math.abs(v.monthlyDeltaUsd).toFixed(2)} ${cheaper}`);
+  }
+
   if (report.warnings.length > 0) {
     console.log("");
     console.log("Warnings:");
