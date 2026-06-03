@@ -43,6 +43,7 @@ export interface ProjectContext {
   packageJsonPath: string | null;
   packageJsonRaw: string | null;
   packageJson: PackageJson | null;
+  packageJsonParseError: string | null;
   allDependencies: Record<string, string>;
   packageManager: PackageManager;
   framework: Framework;

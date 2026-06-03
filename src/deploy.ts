@@ -96,8 +96,8 @@ export function executeDeployPlan(ctx: ProjectContext, report: DeployReport): De
     status: succeeded ? "succeeded" : "failed",
     executed: true,
     requiresConfirmation: false,
-    stdout: redactSecrets(result.stdout),
-    stderr: redactSecrets(result.stderr || (result.error ? result.error.message : "")),
+    stdout: redactSecrets(result.stdout ?? ""),
+    stderr: redactSecrets(result.stderr ?? (result.error ? result.error.message : "")),
     exitCode: result.status,
     nextActions: succeeded
       ? report.mode === "production"

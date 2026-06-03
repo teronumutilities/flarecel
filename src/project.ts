@@ -25,7 +25,15 @@ const IGNORED_DIRS = new Set([
 export async function detectProject(cwd: string): Promise<ProjectContext> {
   const packageJsonPath = path.join(cwd, "package.json");
   const packageJsonRaw = await readFileIfExists(packageJsonPath);
-  const packageJson = packageJsonRaw ? (JSON.parse(packageJsonRaw) as PackageJson) : null;
+  let packageJson: PackageJson | null = null;
+  let packageJsonParseError: string | null = null;
+  if (packageJsonRaw !== null) {
+    try {
+      packageJson = JSON.parse(packageJsonRaw) as PackageJson;
+    } catch (error) {
+      packageJsonParseError = error instanceof Error ? error.message : String(error);
+    }
+  }
   const allDependencies = packageJson ? collectDependencies(packageJson) : {};
   const wrangler = await detectWrangler(cwd);
 
@@ -34,6 +42,7 @@ export async function detectProject(cwd: string): Promise<ProjectContext> {
     packageJsonPath: packageJsonRaw ? packageJsonPath : null,
     packageJsonRaw,
     packageJson,
+    packageJsonParseError,
     allDependencies,
     packageManager: await detectPackageManager(cwd),
     framework: detectFramework(allDependencies),

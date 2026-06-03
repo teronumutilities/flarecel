@@ -6,10 +6,12 @@ export function runDoctor(ctx: ProjectContext): DoctorReport {
 
   if (!ctx.packageJson) {
     issues.push(issue({
-      id: "missing-package-json",
+      id: ctx.packageJsonParseError ? "invalid-package-json" : "missing-package-json",
       severity: "blocking",
-      title: "No package.json found",
-      message: "Flarecel needs to run inside a JavaScript or TypeScript project.",
+      title: ctx.packageJsonParseError ? "package.json could not be parsed" : "No package.json found",
+      message: ctx.packageJsonParseError
+        ? `package.json exists but is not valid JSON: ${ctx.packageJsonParseError}`
+        : "Flarecel needs to run inside a JavaScript or TypeScript project.",
       fixable: false
     }));
 

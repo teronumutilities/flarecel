@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,7 @@ const fixture = path.join(repoRoot, "fixtures", "next-basic");
 
 smokeR2Recipe();
 smokeBetterAuthRecipe();
+smokeDryRunApplyParity();
 smokeCloudflareFeatureRecipes();
 smokeAiAndObservabilityRecipes();
 smokeStatefulAndBrowserRecipes();
@@ -56,6 +57,37 @@ function smokeBetterAuthRecipe() {
     assertCheck(verifyReport, "better-auth-d1-database-id", "warning");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function smokeDryRunApplyParity() {
+  // The core agent trust contract: applied bytes must equal previewed bytes
+  // for the same starting project state.
+  const recipes = [
+    ["add", "auth", "better-auth", "--db", "d1", "--orm", "drizzle"],
+    ["add", "db", "d1", "--orm", "drizzle"],
+    ["add", "durable-object", "room"]
+  ];
+
+  for (const recipe of recipes) {
+    const tmp = copyFixture("flarecel-parity-");
+    try {
+      const dryRun = run([...recipe, "--dry-run", "--json", "--cwd", tmp]);
+      assertEqual(dryRun.status, 0, dryRun.stderr);
+      const changeSet = JSON.parse(dryRun.stdout);
+
+      const apply = run([...recipe, "--apply", "--yes", "--json", "--cwd", tmp]);
+      assertEqual(apply.status, 0, apply.stderr);
+
+      for (const change of changeSet.changes ?? []) {
+        const written = readFileSync(path.join(tmp, change.path), "utf8");
+        if (written !== change.after) {
+          throw new Error(`Parity mismatch for ${recipe.join(" ")} at ${change.path}: applied bytes differ from previewed bytes.`);
+        }
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   }
 }
 

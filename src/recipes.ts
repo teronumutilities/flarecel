@@ -36,7 +36,20 @@ export async function createRecipeChangeSet(
   recipeName: string,
   options: RecipeOptions
 ): Promise<ChangeSet> {
+  if (ctx.packageJsonRaw !== null && ctx.packageJson === null) {
+    return malformedPackageJson(ctx);
+  }
   return withTomlWarning(ctx, await resolveRecipeChangeSet(ctx, recipeName, options));
+}
+
+function malformedPackageJson(ctx: ProjectContext): ChangeSet {
+  return {
+    status: "error",
+    title: "package.json could not be parsed",
+    changes: [],
+    warnings: [`package.json is not valid JSON: ${ctx.packageJsonParseError}`],
+    nextActions: ["Fix package.json, then run flarecel doctor --json."]
+  };
 }
 
 function withTomlWarning(ctx: ProjectContext, changeSet: ChangeSet): ChangeSet {
