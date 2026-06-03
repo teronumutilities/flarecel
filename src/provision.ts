@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { runCommand } from "./exec.js";
 import { redactSecrets } from "./redact.js";
 import type { ProjectContext } from "./types.js";
 
@@ -216,7 +216,7 @@ export function createProvisionPlan(ctx: ProjectContext): ProvisionReport {
   };
 }
 
-export function applyProvisionPlan(ctx: ProjectContext, report: ProvisionReport): ProvisionReport {
+export async function applyProvisionPlan(ctx: ProjectContext, report: ProvisionReport): Promise<ProvisionReport> {
   const actions: ProvisionAction[] = [];
 
   for (const action of report.actions) {
@@ -226,16 +226,13 @@ export function applyProvisionPlan(ctx: ProjectContext, report: ProvisionReport)
     }
 
     const [command, ...args] = action.command;
-    const result = spawnSync(command, args, {
-      cwd: ctx.cwd,
-      encoding: "utf8"
-    });
+    const result = await runCommand(command, args, ctx.cwd);
 
     actions.push({
       ...action,
-      status: result.status === 0 ? "succeeded" : "failed",
+      status: result.code === 0 ? "succeeded" : "failed",
       stdout: result.stdout ? redactSecrets(result.stdout) : result.stdout,
-      stderr: redactSecrets(result.stderr || (result.error ? result.error.message : ""))
+      stderr: redactSecrets(result.stderr)
     });
   }
 

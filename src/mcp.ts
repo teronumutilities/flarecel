@@ -302,7 +302,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
   if (name === "deploy_preview") {
     const plan = createDeployPlan(ctx, { mode: "preview" });
     if (args.confirm !== true) return toolResult(plan);
-    return toolResult(executeDeployPlan(ctx, plan));
+    return toolResult(await executeDeployPlan(ctx, plan));
   }
 
   return toolResult({ message: `Unknown tool: ${name}` }, true);

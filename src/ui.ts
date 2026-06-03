@@ -134,3 +134,31 @@ export function severityIcon(severity: string): string {
 export function label(text: string): string {
   return c.dim(`${text}:`);
 }
+
+export interface Spinner {
+  stop: (finalLine?: string) => void;
+}
+
+// Braille spinner. Writes to STDERR only, and no-ops unless stderr is a TTY and
+// color is enabled — so stdout (JSON/patch/MCP) is never touched. Returns a
+// handle whose stop() clears the line and optionally prints a final status.
+const FRAMES = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"];
+export function startSpinner(text: string): Spinner {
+  if (!enabled || !process.stderr.isTTY) {
+    return { stop: (final) => { if (final) process.stderr.write(`${final}\n`); } };
+  }
+  let i = 0;
+  process.stderr.write("\x1b[?25l"); // hide cursor
+  const timer = setInterval(() => {
+    process.stderr.write(`\r${c.orange(FRAMES[i = (i + 1) % FRAMES.length])} ${c.dim(text)}`);
+  }, 80);
+  timer.unref?.();
+  return {
+    stop: (final) => {
+      clearInterval(timer);
+      process.stderr.write("\r\x1b[2K\x1b[?25h"); // clear line, show cursor
+      if (final) process.stderr.write(`${final}\n`);
+    }
+  };
+}
+

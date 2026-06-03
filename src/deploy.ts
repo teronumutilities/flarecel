@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { createCostEstimate, type CostReport } from "./cost.js";
+import { runCommand } from "./exec.js";
 import { redactSecrets } from "./redact.js";
 import { runVerify } from "./verify.js";
 import type { PackageManager, ProjectContext, Status, VerifyReport } from "./types.js";
@@ -81,24 +81,21 @@ export function markDeployConfirmationRequired(report: DeployReport): DeployRepo
   };
 }
 
-export function executeDeployPlan(ctx: ProjectContext, report: DeployReport): DeployReport {
+export async function executeDeployPlan(ctx: ProjectContext, report: DeployReport): Promise<DeployReport> {
   if (report.status === "blocked") return report;
 
   const [command, ...args] = report.command;
-  const result = spawnSync(command, args, {
-    cwd: ctx.cwd,
-    encoding: "utf8"
-  });
+  const result = await runCommand(command, args, ctx.cwd);
 
-  const succeeded = result.status === 0;
+  const succeeded = result.code === 0;
   return {
     ...report,
     status: succeeded ? "succeeded" : "failed",
     executed: true,
     requiresConfirmation: false,
-    stdout: redactSecrets(result.stdout ?? ""),
-    stderr: redactSecrets(result.stderr ?? (result.error ? result.error.message : "")),
-    exitCode: result.status,
+    stdout: redactSecrets(result.stdout),
+    stderr: redactSecrets(result.stderr),
+    exitCode: result.code,
     nextActions: succeeded
       ? report.mode === "production"
         ? ["Monitor the deployment in Cloudflare dashboard.", "flarecel cost --json"]

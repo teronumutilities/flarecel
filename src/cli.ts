@@ -25,7 +25,7 @@ import { explainIssue, listExplainableIds } from "./explain.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
 import { createFixChangeSet, createKitChangeSet, createRecipeChangeSet, listKits } from "./recipes.js";
 import { runVerify, runRuntimeCheck } from "./verify.js";
-import { setColorEnabled, banner } from "./ui.js";
+import { setColorEnabled, banner, startSpinner } from "./ui.js";
 import type { ChangeSet } from "./types.js";
 
 async function main(): Promise<void> {
@@ -159,7 +159,9 @@ async function main(): Promise<void> {
         return;
       }
 
-      const applied = applyProvisionPlan(ctx, report);
+      const spin = hasFlag(args, "json") ? null : startSpinner("Provisioning Cloudflare resources…");
+      const applied = await applyProvisionPlan(ctx, report);
+      spin?.stop();
       if (hasFlag(args, "json")) printJson(applied);
       else printProvision(applied);
       process.exitCode = applied.status === "failed" ? 2 : 0;
@@ -213,9 +215,14 @@ async function main(): Promise<void> {
     const production = hasFlag(args, "production");
     const plan = createDeployPlan(ctx, { mode: production ? "production" : "preview" });
     const wantsExecution = hasFlag(args, "yes") && !hasFlag(args, "dry-run");
-    const payload = wantsExecution
-      ? executeDeployPlan(ctx, plan)
-      : markDeployConfirmationRequired(plan);
+    let payload;
+    if (wantsExecution) {
+      const spin = hasFlag(args, "json") ? null : startSpinner(`Deploying (${production ? "production" : "preview"})…`);
+      payload = await executeDeployPlan(ctx, plan);
+      spin?.stop();
+    } else {
+      payload = markDeployConfirmationRequired(plan);
+    }
 
     if (hasFlag(args, "json")) printJson(payload);
     else printDeploy(payload);
