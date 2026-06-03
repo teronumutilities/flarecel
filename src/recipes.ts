@@ -1,9 +1,28 @@
 import { existsSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { readFileIfExists, projectName } from "./project.js";
+import { applyChangeSet } from "./patches.js";
+import { detectProject, readFileIfExists, projectName } from "./project.js";
 import type { ChangeSet, DoctorReport, PackageJson, PlannedChange, ProjectContext } from "./types.js";
 
 type JsonObject = Record<string, unknown>;
+
+// Pinned dependency versions (npm registry, 2026-06-03). Caret ranges allow
+// patch/minor updates while avoiding silent major breakage from "latest".
+const DEP_VERSIONS: Record<string, string> = {
+  "@opennextjs/cloudflare": "^1.19.11",
+  "wrangler": "^4.97.0",
+  "@cloudflare/workers-types": "^4.20260603.1",
+  "better-auth": "^1.6.14",
+  "drizzle-orm": "^0.45.2",
+  "drizzle-kit": "^0.31.10",
+  "@cloudflare/puppeteer": "^1.1.0"
+};
+
+function depVersion(name: string): string {
+  return DEP_VERSIONS[name] ?? "latest";
+}
 
 export interface RecipeOptions {
   positionals: string[];
@@ -39,7 +58,163 @@ export async function createRecipeChangeSet(
   if (ctx.packageJsonRaw !== null && ctx.packageJson === null) {
     return malformedPackageJson(ctx);
   }
-  return withTomlWarning(ctx, await resolveRecipeChangeSet(ctx, recipeName, options));
+  return withFrameworkWarning(ctx, withTomlWarning(ctx, await resolveRecipeChangeSet(ctx, recipeName, options)));
+}
+
+interface KitRecipe {
+  recipe: string;
+  positionals: string[];
+  flags: Record<string, string | boolean>;
+}
+
+const KITS: Record<string, { title: string; recipes: KitRecipe[] }> = {
+  saas: {
+    title: "SaaS Kit",
+    recipes: [
+      { recipe: "next-opennext", positionals: [], flags: {} },
+      { recipe: "auth", positionals: ["better-auth"], flags: { db: "d1", orm: "drizzle" } },
+      { recipe: "r2", positionals: ["uploads"], flags: {} },
+      { recipe: "queue", positionals: ["emails"], flags: {} },
+      { recipe: "rate-limit", positionals: [], flags: { route: "/api/*", limit: "60/min" } },
+      { recipe: "turnstile", positionals: [], flags: { form: "signup" } },
+      { recipe: "observability", positionals: [], flags: { sampling: "1" } }
+    ]
+  },
+  "ai-app": {
+    title: "AI App Kit",
+    recipes: [
+      { recipe: "next-opennext", positionals: [], flags: {} },
+      { recipe: "ai-gateway", positionals: [], flags: { provider: "openai" } },
+      { recipe: "workers-ai", positionals: [], flags: {} },
+      { recipe: "vectorize", positionals: ["docs-search"], flags: { dimensions: "768", metric: "cosine" } },
+      { recipe: "r2", positionals: ["uploads"], flags: {} },
+      { recipe: "queue", positionals: ["ingestion"], flags: {} },
+      { recipe: "rate-limit", positionals: [], flags: { route: "/api/*", limit: "30/min" } },
+      { recipe: "observability", positionals: [], flags: { sampling: "1" } }
+    ]
+  }
+};
+
+export function listKits(): string[] {
+  return Object.keys(KITS);
+}
+
+export async function createKitChangeSet(ctx: ProjectContext, kitName: string): Promise<ChangeSet> {
+  const kit = KITS[kitName];
+  if (!kit) {
+    return {
+      status: "error",
+      title: `Unknown kit: ${kitName}`,
+      changes: [],
+      warnings: [`Available kits: ${listKits().join(", ")}.`],
+      nextActions: ["flarecel doctor --json"]
+    };
+  }
+  if (ctx.framework !== "nextjs") {
+    return {
+      status: "error",
+      title: `${kit.title} requires a Next.js project`,
+      changes: [],
+      warnings: [`Detected framework: ${ctx.framework}. App kits target Next.js on OpenNext.`],
+      nextActions: ["flarecel doctor --json"]
+    };
+  }
+
+  // Compose by threading state through a temp working copy so recipes that
+  // mutate shared files (package.json, wrangler.jsonc, cloudflare-env.d.ts)
+  // accumulate instead of clobbering each other. Then diff back to one changeset.
+  const work = mkdtempSync(path.join(tmpdir(), "flarecel-kit-"));
+  const warnings: string[] = [];
+  try {
+    copyProject(ctx.cwd, work);
+
+    for (const step of kit.recipes) {
+      const workCtx = await detectProject(work);
+      const changeSet = await resolveRecipeChangeSet(workCtx, step.recipe, {
+        positionals: [...step.positionals],
+        flags: { ...step.flags }
+      });
+      if (changeSet.status === "error") {
+        return {
+          status: "error",
+          title: `${kit.title} failed at recipe: ${step.recipe}`,
+          changes: [],
+          warnings: changeSet.warnings,
+          nextActions: ["flarecel doctor --json"]
+        };
+      }
+      for (const warning of changeSet.warnings) {
+        if (!warnings.includes(warning)) warnings.push(warning);
+      }
+      await applyChangeSet(work, changeSet);
+    }
+
+    const changes = await diffProject(ctx.cwd, work);
+    return {
+      status: changes.length > 0 ? "planned" : "empty",
+      title: `Add ${kit.title}`,
+      changes,
+      warnings: [
+        "This kit composes multiple recipes. Review all generated files before applying.",
+        "It does not run npm install or create remote Cloudflare resources.",
+        ...warnings
+      ],
+      nextActions: [
+        "npm install",
+        "npm run cf-typegen",
+        "flarecel provision --json",
+        "flarecel verify --json"
+      ]
+    };
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+const KIT_IGNORE = /^(?:node_modules|\.git|\.next|\.open-next|dist|\.flarecel)$/;
+
+function copyProject(from: string, to: string): void {
+  cpSync(from, to, {
+    recursive: true,
+    filter: (src) => !KIT_IGNORE.test(path.basename(src))
+  });
+}
+
+async function diffProject(projectDir: string, work: string): Promise<PlannedChange[]> {
+  const changes: PlannedChange[] = [];
+
+  const collect = async (relativeDir: string): Promise<void> => {
+    for (const entry of readdirSync(path.join(work, relativeDir), { withFileTypes: true })) {
+      if (KIT_IGNORE.test(entry.name)) continue;
+      const rel = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        await collect(rel);
+        continue;
+      }
+      const after = readFileSync(path.join(work, rel), "utf8");
+      const original = await readFileIfExists(path.join(projectDir, rel));
+      if (original !== after) {
+        changes.push({ path: rel, before: original, after, reason: "Kit composed change" });
+      }
+    }
+  };
+
+  await collect("");
+  return changes.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function withFrameworkWarning(ctx: ProjectContext, changeSet: ChangeSet): ChangeSet {
+  if (ctx.framework === "nextjs" || ctx.framework === "unknown") return changeSet;
+  const emitsNextRoute = changeSet.changes.some((change) => /(?:^|\/)app\/api\/.+\/route\.ts$/.test(change.path));
+  if (!emitsNextRoute) return changeSet;
+
+  return {
+    ...changeSet,
+    warnings: [
+      `This recipe generates Next.js App Router code, but the detected framework is ${ctx.framework}. Review the generated route handlers; they may need to be adapted.`,
+      ...changeSet.warnings
+    ]
+  };
 }
 
 function malformedPackageJson(ctx: ProjectContext): ChangeSet {
@@ -70,7 +245,18 @@ async function resolveRecipeChangeSet(
   recipeName: string,
   options: RecipeOptions
 ): Promise<ChangeSet> {
-  if (recipeName === "next-opennext") return nextOpenNextRecipe(ctx);
+  if (recipeName === "next-opennext") {
+    if (ctx.framework !== "nextjs") {
+      return {
+        status: "error",
+        title: "next-opennext requires a Next.js project",
+        changes: [],
+        warnings: [`Detected framework: ${ctx.framework}. The OpenNext adapter only applies to Next.js.`],
+        nextActions: ["flarecel doctor --json"]
+      };
+    }
+    return nextOpenNextRecipe(ctx);
+  }
 
   if (recipeName === "r2") {
     const kind = options.positionals[0] ?? "uploads";
@@ -156,9 +342,9 @@ async function nextOpenNextRecipe(ctx: ProjectContext): Promise<ChangeSet> {
     pkg.devDependencies = pkg.devDependencies ?? {};
     pkg.scripts = pkg.scripts ?? {};
 
-    pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
-    pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-    pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+    pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
+    pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+    pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
 
     pkg.scripts.build = pkg.scripts.build ?? "next build";
     pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";
@@ -217,10 +403,10 @@ async function r2UploadsRecipe(ctx: ProjectContext): Promise<ChangeSet> {
     await packageJsonChange(ctx, "Add Cloudflare Workers types for R2", (pkg) => {
       if (ctx.framework === "nextjs") {
         pkg.dependencies = pkg.dependencies ?? {};
-        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
       }
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
     }),
     await wranglerChange(ctx, "Bind an R2 bucket for uploads", (config) => {
       config.r2_buckets = upsertArrayObject(config.r2_buckets, "binding", {
@@ -257,7 +443,7 @@ async function rateLimitRecipe(ctx: ProjectContext, options: RecipeOptions): Pro
   const changes = [
     await packageJsonChange(ctx, "Add Cloudflare Workers types for Rate Limiting", (pkg) => {
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
     }),
     await wranglerChange(ctx, "Add Cloudflare Rate Limiting binding", (config) => {
       config.ratelimits = upsertArrayObject(config.ratelimits, "name", {
@@ -301,10 +487,10 @@ async function d1DrizzleRecipe(ctx: ProjectContext): Promise<ChangeSet> {
       pkg.devDependencies = pkg.devDependencies ?? {};
       pkg.scripts = pkg.scripts ?? {};
 
-      pkg.dependencies["drizzle-orm"] = pkg.dependencies["drizzle-orm"] ?? "latest";
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["drizzle-kit"] = pkg.devDependencies["drizzle-kit"] ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.dependencies["drizzle-orm"] = pkg.dependencies["drizzle-orm"] ?? depVersion("drizzle-orm");
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["drizzle-kit"] = pkg.devDependencies["drizzle-kit"] ?? depVersion("drizzle-kit");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
 
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
       pkg.scripts["db:generate"] = "drizzle-kit generate";
@@ -354,8 +540,8 @@ async function kvCacheRecipe(ctx: ProjectContext): Promise<ChangeSet> {
   const changes = [
     await packageJsonChange(ctx, "Add Cloudflare Workers types for KV", (pkg) => {
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
     }),
@@ -395,10 +581,10 @@ async function turnstileRecipe(ctx: ProjectContext, options: RecipeOptions): Pro
     await packageJsonChange(ctx, "Add Cloudflare Workers types for Turnstile env values", (pkg) => {
       if (ctx.framework === "nextjs") {
         pkg.dependencies = pkg.dependencies ?? {};
-        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
       }
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
     }),
@@ -439,7 +625,7 @@ async function cronRecipe(ctx: ProjectContext, cronNameInput: string, options: R
   const changes = [
     await packageJsonChange(ctx, "Add Cloudflare Workers types for Cron Triggers", (pkg) => {
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
     }),
     await wranglerChange(ctx, "Add Cloudflare Cron Trigger", (config) => {
       const triggers = asObject(config.triggers);
@@ -472,11 +658,11 @@ async function workersAiRecipe(ctx: ProjectContext, options: RecipeOptions): Pro
     await packageJsonChange(ctx, "Add Cloudflare Workers AI binding support", (pkg) => {
       if (ctx.framework === "nextjs") {
         pkg.dependencies = pkg.dependencies ?? {};
-        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
       }
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
     }),
@@ -516,8 +702,8 @@ async function vectorizeRecipe(ctx: ProjectContext, indexNameInput: string, opti
   const changes = [
     await packageJsonChange(ctx, "Add Cloudflare Vectorize binding support", (pkg) => {
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
     }),
@@ -556,7 +742,7 @@ async function aiGatewayRecipe(ctx: ProjectContext, options: RecipeOptions): Pro
   const changes = [
     await packageJsonChange(ctx, "Add Cloudflare Workers types for AI Gateway env values", (pkg) => {
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
     }),
     await fileChange(ctx, "src/cloudflare/ai-gateway.ts", aiGatewayHelper(provider), "Add AI Gateway fetch helper"),
     await appendLinesChange(ctx, ".dev.vars.example", [
@@ -596,7 +782,7 @@ async function observabilityRecipe(ctx: ProjectContext, options: RecipeOptions):
   const changes = [
     await packageJsonChange(ctx, "Add Wrangler for Workers observability commands", (pkg) => {
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["logs:tail"] = "wrangler tail";
     }),
@@ -636,7 +822,7 @@ async function durableObjectRecipe(ctx: ProjectContext, objectNameInput: string)
     await packageJsonChange(ctx, "Add Cloudflare Workers types for Durable Objects", (pkg) => {
       if (ctx.framework === "nextjs") {
         pkg.dependencies = pkg.dependencies ?? {};
-        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
         pkg.scripts = pkg.scripts ?? {};
         pkg.scripts.build = pkg.scripts.build ?? "next build";
         pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";
@@ -644,8 +830,8 @@ async function durableObjectRecipe(ctx: ProjectContext, objectNameInput: string)
         pkg.scripts.upload = "opennextjs-cloudflare build && opennextjs-cloudflare upload";
       }
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
     }),
@@ -703,7 +889,7 @@ async function workflowRecipe(ctx: ProjectContext, workflowNameInput: string, op
     await packageJsonChange(ctx, "Add Cloudflare Workflows support", (pkg) => {
       if (ctx.framework === "nextjs") {
         pkg.dependencies = pkg.dependencies ?? {};
-        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
         pkg.scripts = pkg.scripts ?? {};
         pkg.scripts.build = pkg.scripts.build ?? "next build";
         pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";
@@ -711,8 +897,8 @@ async function workflowRecipe(ctx: ProjectContext, workflowNameInput: string, op
         pkg.scripts.upload = "opennextjs-cloudflare build && opennextjs-cloudflare upload";
       }
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
       pkg.scripts["workflows:list"] = `wrangler workflows instances list ${workflowName}`;
@@ -770,12 +956,12 @@ async function browserRunRecipe(ctx: ProjectContext): Promise<ChangeSet> {
     await packageJsonChange(ctx, "Add Cloudflare Browser Run support", (pkg) => {
       pkg.dependencies = pkg.dependencies ?? {};
       if (ctx.framework === "nextjs") {
-        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
+        pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
       }
-      pkg.dependencies["@cloudflare/puppeteer"] = pkg.dependencies["@cloudflare/puppeteer"] ?? "latest";
+      pkg.dependencies["@cloudflare/puppeteer"] = pkg.dependencies["@cloudflare/puppeteer"] ?? depVersion("@cloudflare/puppeteer");
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
       pkg.scripts = pkg.scripts ?? {};
       pkg.scripts["cf-typegen"] = "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts";
     }),
@@ -816,7 +1002,7 @@ async function queueRecipe(ctx: ProjectContext, queueNameInput: string): Promise
   const changes = [
     await packageJsonChange(ctx, "Add Cloudflare Workers types for Queues", (pkg) => {
       pkg.devDependencies = pkg.devDependencies ?? {};
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
     }),
     await wranglerChange(ctx, "Add Cloudflare Queue producer config", (config) => {
       const queues = asObject(config.queues);
@@ -891,13 +1077,13 @@ async function betterAuthD1DrizzleRecipe(ctx: ProjectContext): Promise<ChangeSet
       pkg.devDependencies = pkg.devDependencies ?? {};
       pkg.scripts = pkg.scripts ?? {};
 
-      pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? "latest";
-      pkg.dependencies["better-auth"] = pkg.dependencies["better-auth"] ?? "latest";
-      pkg.dependencies["drizzle-orm"] = pkg.dependencies["drizzle-orm"] ?? "latest";
+      pkg.dependencies["@opennextjs/cloudflare"] = pkg.dependencies["@opennextjs/cloudflare"] ?? depVersion("@opennextjs/cloudflare");
+      pkg.dependencies["better-auth"] = pkg.dependencies["better-auth"] ?? depVersion("better-auth");
+      pkg.dependencies["drizzle-orm"] = pkg.dependencies["drizzle-orm"] ?? depVersion("drizzle-orm");
 
-      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? "latest";
-      pkg.devDependencies["drizzle-kit"] = pkg.devDependencies["drizzle-kit"] ?? "latest";
-      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? "latest";
+      pkg.devDependencies.wrangler = pkg.devDependencies.wrangler ?? depVersion("wrangler");
+      pkg.devDependencies["drizzle-kit"] = pkg.devDependencies["drizzle-kit"] ?? depVersion("drizzle-kit");
+      pkg.devDependencies["@cloudflare/workers-types"] = pkg.devDependencies["@cloudflare/workers-types"] ?? depVersion("@cloudflare/workers-types");
 
       pkg.scripts.build = pkg.scripts.build ?? "next build";
       pkg.scripts.preview = "opennextjs-cloudflare build && opennextjs-cloudflare preview";

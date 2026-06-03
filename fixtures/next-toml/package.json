@@ -1,0 +1,13 @@
+{
+  "name": "next-toml",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build"
+  },
+  "dependencies": {
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  }
+}

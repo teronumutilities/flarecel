@@ -21,8 +21,11 @@ npx flarecel provision --json
 
 ```bash
 flarecel doctor
+flarecel doctor --fix
 flarecel plan
 flarecel fix --dry-run
+flarecel kit saas --dry-run
+flarecel kit ai-app --dry-run
 flarecel add next-opennext --dry-run --format patch
 flarecel add r2 uploads --dry-run --format patch
 flarecel add db d1 --orm drizzle --dry-run
@@ -94,6 +97,9 @@ Implemented now:
 - Apply-safe fixes with `--apply --yes`.
 - MVP recipes for OpenNext, R2 uploads, D1 + Drizzle, KV cache, Rate Limiting, Queues, Turnstile, Cron Triggers, Workers AI, Vectorize, AI Gateway, Observability, Durable Objects, Workflows, and Browser Run.
 - MVP Better Auth + D1 + Drizzle recipe.
+- App kits (`kit saas`, `kit ai-app`) that compose multiple recipes into one reviewable change set.
+- `doctor --fix` to chain doctor -> fix -> verify in one call.
+- Pinned recipe dependency versions (caret ranges) instead of `latest`.
 - Provision planning from Wrangler bindings.
 - Cost estimation and gated preview/production deploy planning.
 - Stdio MCP server with tool discovery and tool calls.

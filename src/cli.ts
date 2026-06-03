@@ -21,7 +21,7 @@ import { applyChangeSet, renderPatch } from "./patches.js";
 import { createPlan } from "./plan.js";
 import { detectProject } from "./project.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
-import { createFixChangeSet, createRecipeChangeSet } from "./recipes.js";
+import { createFixChangeSet, createKitChangeSet, createRecipeChangeSet, listKits } from "./recipes.js";
 import { runVerify } from "./verify.js";
 import type { ChangeSet } from "./types.js";
 
@@ -38,6 +38,10 @@ async function main(): Promise<void> {
 
   if (args.command === "doctor") {
     const report = runDoctor(ctx);
+    if (hasFlag(args, "fix")) {
+      await runDoctorFix(cwd, ctx, args, report);
+      return;
+    }
     if (hasFlag(args, "json")) printJson(report);
     else printDoctor(report);
     process.exitCode = exitCodeForStatus(report.status);
@@ -71,6 +75,18 @@ async function main(): Promise<void> {
       positionals: args.positionals,
       flags: args.flags
     });
+    await handleChangeSet(cwd, args, changeSet);
+    return;
+  }
+
+  if (args.command === "kit") {
+    const kitName = args.positionals.shift();
+    if (!kitName) {
+      fail(`Missing kit name. Available: ${listKits().join(", ")}`);
+      process.exitCode = 4;
+      return;
+    }
+    const changeSet = await createKitChangeSet(ctx, kitName);
     await handleChangeSet(cwd, args, changeSet);
     return;
   }
@@ -171,6 +187,34 @@ async function main(): Promise<void> {
   process.exitCode = 4;
 }
 
+async function runDoctorFix(
+  cwd: string,
+  ctx: Awaited<ReturnType<typeof detectProject>>,
+  args: ReturnType<typeof parseArgs>,
+  report: ReturnType<typeof runDoctor>
+): Promise<void> {
+  const apply = hasFlag(args, "apply") && hasFlag(args, "yes");
+  let changeSet = await createFixChangeSet(ctx, report);
+  if (apply && changeSet.status === "planned") {
+    changeSet = await applyChangeSet(cwd, changeSet);
+  }
+
+  // Re-detect after a real apply so verify reflects the patched state.
+  const verifyCtx = apply ? await detectProject(cwd) : ctx;
+  const verify = runVerify(verifyCtx);
+
+  if (hasFlag(args, "json")) {
+    printJson({ doctor: report, fix: changeSet, verify });
+  } else {
+    printDoctor(report);
+    console.log("");
+    printChangeSet(changeSet);
+    console.log("");
+    printVerify(verify);
+  }
+  process.exitCode = exitCodeForStatus(verify.status);
+}
+
 async function handleChangeSet(cwd: string, args: ReturnType<typeof parseArgs>, changeSet: ChangeSet): Promise<void> {
   const wantsPatch = getFlag(args, "format") === "patch";
   const wantsApply = hasFlag(args, "apply");
@@ -217,9 +261,12 @@ Agent-friendly Cloudflare Workers deployment assistant.
 
 Usage:
   flarecel doctor [--json] [--cwd <path>]
+  flarecel doctor --fix [--apply --yes]
   flarecel plan [--json]
   flarecel fix [--dry-run] [--format patch]
   flarecel fix --apply --yes
+  flarecel kit saas [--dry-run] [--format patch]
+  flarecel kit ai-app [--dry-run] [--format patch]
   flarecel add next-opennext [--dry-run] [--format patch]
   flarecel add r2 uploads [--dry-run] [--format patch]
   flarecel add db d1 --orm drizzle [--dry-run] [--format patch]

@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { DoctorReport, Issue, ProjectContext, Severity, Status } from "./types.js";
 
@@ -36,6 +37,7 @@ export function runDoctor(ctx: ProjectContext): DoctorReport {
 
   checkPackageRisks(ctx, issues);
   checkSourceRisks(ctx, issues);
+  checkAuthSecrets(ctx, issues);
 
   return report(ctx, issues);
 }
@@ -48,6 +50,8 @@ export function exitCodeForStatus(status: Status): number {
       return 1;
     case "blocking":
       return 2;
+    case "secrets-missing":
+      return 3;
     case "unsupported":
       return 4;
   }
@@ -243,6 +247,42 @@ function checkSourceRisks(ctx: ProjectContext, issues: Issue[]): void {
   }
 }
 
+function checkAuthSecrets(ctx: ProjectContext, issues: Issue[]): void {
+  const routeCandidates = [
+    "app/api/auth/[...all]/route.ts",
+    "src/app/api/auth/[...all]/route.ts"
+  ];
+  const usesBetterAuth =
+    Boolean(ctx.allDependencies["better-auth"]) ||
+    routeCandidates.some((candidate) => existsSync(path.join(ctx.cwd, candidate)));
+  if (!usesBetterAuth) return;
+
+  // A declared binding type or a set local/Wrangler secret both satisfy this.
+  const envTypes = readTextSync(path.join(ctx.cwd, "cloudflare-env.d.ts"));
+  const devVars = readTextSync(path.join(ctx.cwd, ".dev.vars"));
+  const declared =
+    Boolean(envTypes?.includes("BETTER_AUTH_SECRET")) ||
+    Boolean(devVars?.includes("BETTER_AUTH_SECRET"));
+  if (declared) return;
+
+  issues.push(issue({
+    id: "auth-secret-missing",
+    severity: "high",
+    title: "Better Auth secret is not configured",
+    message: "Better Auth is in use but BETTER_AUTH_SECRET is not declared in cloudflare-env.d.ts or .dev.vars. Set it as a Wrangler secret before deploy.",
+    fixable: false,
+    recommendedCommand: "wrangler secret put BETTER_AUTH_SECRET"
+  }));
+}
+
+function readTextSync(filePath: string): string | null {
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 function report(ctx: ProjectContext, issues: Issue[]): DoctorReport {
   const status = statusFromIssues(issues);
   const score = readinessScore(issues);
@@ -282,6 +322,7 @@ function buildNextActions(issues: Issue[], status: Status): string[] {
 function statusFromIssues(issues: Issue[]): Status {
   if (issues.some((candidate) => candidate.id === "unknown-framework")) return "unsupported";
   if (issues.some((candidate) => candidate.severity === "blocking")) return "blocking";
+  if (issues.some((candidate) => candidate.id === "auth-secret-missing")) return "secrets-missing";
   if (issues.length > 0) return "warning";
   return "ready";
 }

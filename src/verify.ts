@@ -23,6 +23,14 @@ export function runVerify(ctx: ProjectContext): VerifyReport {
       : "No wrangler config found."
   });
 
+  if (ctx.wrangler.format === "toml") {
+    checks.push({
+      id: "wrangler-toml-unverified",
+      status: "warning",
+      message: "wrangler.toml detected. Flarecel verifies and patches JSONC config; binding checks are skipped for TOML."
+    });
+  }
+
   if (ctx.framework === "nextjs") {
     checks.push({
       id: "opennext-installed",

@@ -11,7 +11,7 @@ export type PackageManager = "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 
 export type Severity = "info" | "warning" | "high" | "blocking";
 
-export type Status = "ready" | "warning" | "blocking" | "unsupported";
+export type Status = "ready" | "warning" | "blocking" | "unsupported" | "secrets-missing";
 
 export interface PackageJson {
   name?: string;

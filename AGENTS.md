@@ -24,6 +24,21 @@ Rules:
 - Use `flarecel mcp` when the host supports MCP stdio tools.
 - Run `npm test` after changing recipes, verifier logic, MCP tools, or provisioning behavior.
 - Prefer recipe commands over handwritten Cloudflare config when available, including `add db d1 --orm drizzle`, `add kv cache`, `add turnstile`, `add cron`, `add workers-ai`, `add vectorize`, `add ai-gateway`, `add observability`, `add durable-object`, `add workflow`, and `add browser-run`.
+- Prefer `kit saas` or `kit ai-app` to scaffold a full Cloudflare stack in one reviewable change set, then review every file before `--apply --yes`.
+- Use `doctor --fix` to run doctor -> fix -> verify in one call (add `--apply --yes` to write).
+
+Exit codes (every command):
+
+```txt
+0 = ready
+1 = warnings
+2 = blocking issue
+3 = auth/secrets missing
+4 = unsupported project / unknown command or recipe
+5 = user confirmation required (--apply --yes / --production --yes)
+```
+
+Treat exit code 3 as a hard gate: resolve missing secrets (for example `wrangler secret put BETTER_AUTH_SECRET`) before deploy.
 
 The agent loop is:
 
