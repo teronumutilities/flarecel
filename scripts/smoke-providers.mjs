@@ -9,8 +9,8 @@ const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cli = path.join(repoRoot, "dist", "cli.js");
 const fixture = path.join(repoRoot, "fixtures", "next-basic");
 
-// Each case: [args, load-bearing substring that MUST appear in some generated file].
-// These substrings are the facts verified against live docs on 2026-06-04.
+// each case: [args, load-bearing substring that MUST appear in some generated file].
+// these substrings are the facts verified against live docs on 2026-06-04.
 const cases = [
   [["add", "auth", "clerk"], "@clerk/nextjs/server"],
   [["add", "auth", "supabase"], "@supabase/ssr"],
@@ -48,7 +48,7 @@ function smokeProviders() {
     if (!blob.includes(mustContain)) {
       throw new Error(`${args.join(" ")}: expected generated output to contain "${mustContain}"`);
     }
-    // Every provider recipe must ship a doc.
+    // every provider recipe must ship a doc.
     if (!changeSet.changes.some((c) => /^docs\/flarecel-.*\.md$/.test(c.path))) {
       throw new Error(`${args.join(" ")}: missing generated doc`);
     }
@@ -64,7 +64,7 @@ function smokeUnknownProviders() {
 }
 
 function smokeProviderParity() {
-  // Spot-check dry-run/apply byte parity on a representative external recipe.
+  // spot-check dry-run/apply byte parity on a representative external recipe.
   const tmp = mkdtempSync(path.join(tmpdir(), "flarecel-prov-parity-"));
   try {
     cpSync(fixture, tmp, { recursive: true });

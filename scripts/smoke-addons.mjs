@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,14 +9,40 @@ const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cli = path.join(repoRoot, "dist", "cli.js");
 const fixture = path.join(repoRoot, "fixtures", "next-basic");
 
-smokeR2Recipe();
-smokeBetterAuthRecipe();
+smokeR2AddOn();
+smokeBetterAuthAddOn();
 smokeDryRunApplyParity();
-smokeCloudflareFeatureRecipes();
-smokeAiAndObservabilityRecipes();
-smokeStatefulAndBrowserRecipes();
+smokeCloudflareFeatureAddOns();
+smokeAiAndObservabilityAddOns();
+smokeStatefulAndBrowserAddOns();
+smokeHyperdriveQueueProvision();
 
-function smokeR2Recipe() {
+// richer provisioning: Hyperdrive (manual, no secret embedded) + consumer-only queue.
+function smokeHyperdriveQueueProvision() {
+  const tmp = mkdtempSync(path.join(tmpdir(), "flarecel-prov-extra-"));
+  try {
+    writeFileSync(path.join(tmp, "package.json"), JSON.stringify({ name: "app" }));
+    writeFileSync(path.join(tmp, "wrangler.json"), JSON.stringify({
+      name: "app", main: "x.ts",
+      hyperdrive: [{ binding: "HYPERDRIVE", id: "replace-with-hyperdrive-id" }],
+      queues: { consumers: [{ queue: "emails" }] }
+    }));
+  const report = JSON.parse(run(["provision", "--json", "--cwd", tmp]).stdout);
+  if (!report.actions?.some((a) => a.id === "queue:emails" && (a.command ?? []).join(" ") === "wrangler queues create emails")) {
+    throw new Error("Expected consumer-only queue to get a create action.");
+  }
+  if (!report.warnings?.some((warning) => warning.includes("multiple accounts"))) {
+    throw new Error("Expected provisioning plan to warn about account selection before account-specific apply.");
+  }
+  const hp = report.actions?.find((a) => a.id === "hyperdrive:HYPERDRIVE");
+    if (!hp) throw new Error("Expected a Hyperdrive provisioning action.");
+    if ((hp.command ?? []).length !== 0) throw new Error("Hyperdrive action must not auto-run (connection string is a secret).");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function smokeR2AddOn() {
   const tmp = copyFixture("flarecel-r2-");
   try {
     const result = run(["add", "r2", "uploads", "--dry-run", "--json", "--cwd", tmp]);
@@ -28,7 +54,7 @@ function smokeR2Recipe() {
   }
 }
 
-function smokeBetterAuthRecipe() {
+function smokeBetterAuthAddOn() {
   const tmp = copyFixture("flarecel-auth-");
   try {
     const dryRun = run(["add", "auth", "better-auth", "--db", "d1", "--orm", "drizzle", "--dry-run", "--json", "--cwd", tmp]);
@@ -61,28 +87,28 @@ function smokeBetterAuthRecipe() {
 }
 
 function smokeDryRunApplyParity() {
-  // The core agent trust contract: applied bytes must equal previewed bytes
+  // the core agent trust contract: applied bytes must equal previewed bytes
   // for the same starting project state.
-  const recipes = [
+  const addOns = [
     ["add", "auth", "better-auth", "--db", "d1", "--orm", "drizzle"],
     ["add", "db", "d1", "--orm", "drizzle"],
     ["add", "durable-object", "room"]
   ];
 
-  for (const recipe of recipes) {
+  for (const addOn of addOns) {
     const tmp = copyFixture("flarecel-parity-");
     try {
-      const dryRun = run([...recipe, "--dry-run", "--json", "--cwd", tmp]);
+      const dryRun = run([...addOn, "--dry-run", "--json", "--cwd", tmp]);
       assertEqual(dryRun.status, 0, dryRun.stderr);
       const changeSet = JSON.parse(dryRun.stdout);
 
-      const apply = run([...recipe, "--apply", "--yes", "--json", "--cwd", tmp]);
+      const apply = run([...addOn, "--apply", "--yes", "--json", "--cwd", tmp]);
       assertEqual(apply.status, 0, apply.stderr);
 
       for (const change of changeSet.changes ?? []) {
         const written = readFileSync(path.join(tmp, change.path), "utf8");
         if (written !== change.after) {
-          throw new Error(`Parity mismatch for ${recipe.join(" ")} at ${change.path}: applied bytes differ from previewed bytes.`);
+          throw new Error(`Parity mismatch for ${addOn.join(" ")} at ${change.path}: applied bytes differ from previewed bytes.`);
         }
       }
     } finally {
@@ -91,8 +117,8 @@ function smokeDryRunApplyParity() {
   }
 }
 
-function smokeCloudflareFeatureRecipes() {
-  smokeDryRunRecipe(
+function smokeCloudflareFeatureAddOns() {
+  smokeDryRunAddOn(
     ["add", "db", "d1", "--orm", "drizzle", "--dry-run", "--json"],
     ["db/schema.ts", "lib/db.ts", "drizzle.config.ts"]
   );
@@ -116,18 +142,18 @@ function smokeCloudflareFeatureRecipes() {
     rmSync(kvTmp, { recursive: true, force: true });
   }
 
-  smokeDryRunRecipe(
+  smokeDryRunAddOn(
     ["add", "turnstile", "--form", "signup", "--dry-run", "--json"],
     ["src/cloudflare/turnstile.ts", "app/api/turnstile/signup/verify/route.ts"]
   );
 
-  const cron = smokeDryRunRecipe(
+  const cron = smokeDryRunAddOn(
     ["add", "cron", "daily-cleanup", "--schedule", "0 0 * * *", "--dry-run", "--json"],
     ["src/cloudflare/cron/daily-cleanup.ts"]
   );
   const wrangler = cron.changes?.find((change) => change.path === "wrangler.jsonc");
   if (!wrangler?.after.includes("\"crons\"")) {
-    throw new Error("Expected Cron recipe to add triggers.crons to wrangler.jsonc.");
+    throw new Error("Expected Cron addOn to add triggers.crons to wrangler.jsonc.");
   }
 
   const cronTmp = copyFixture("flarecel-cron-");
@@ -143,7 +169,7 @@ function smokeCloudflareFeatureRecipes() {
   }
 }
 
-function smokeAiAndObservabilityRecipes() {
+function smokeAiAndObservabilityAddOns() {
   const workersAiTmp = copyFixture("flarecel-workers-ai-");
   try {
     rmSync(path.join(workersAiTmp, "app", "api", "edge-risk"), { recursive: true, force: true });
@@ -172,7 +198,7 @@ function smokeAiAndObservabilityRecipes() {
     rmSync(vectorizeTmp, { recursive: true, force: true });
   }
 
-  smokeDryRunRecipe(
+  smokeDryRunAddOn(
     ["add", "ai-gateway", "--provider", "openai", "--dry-run", "--json"],
     ["src/cloudflare/ai-gateway.ts", "docs/flarecel-ai-gateway.md"]
   );
@@ -190,7 +216,7 @@ function smokeAiAndObservabilityRecipes() {
   }
 }
 
-function smokeStatefulAndBrowserRecipes() {
+function smokeStatefulAndBrowserAddOns() {
   const durableTmp = copyFixture("flarecel-do-");
   try {
     const apply = run(["add", "durable-object", "room", "--apply", "--yes", "--json", "--cwd", durableTmp]);
@@ -239,23 +265,23 @@ function smokeStatefulAndBrowserRecipes() {
     rmSync(browserTmp, { recursive: true, force: true });
   }
 
-  smokeDryRunRecipe(
+  smokeDryRunAddOn(
     ["add", "durable-object", "counter", "--dry-run", "--json"],
     ["src/cloudflare/durable-objects/counter.ts", "cloudflare-worker.ts", "app/api/durable-objects/counter/route.ts"]
   );
 
-  smokeDryRunRecipe(
+  smokeDryRunAddOn(
     ["add", "workflow", "importer", "--schedule", "0 9 * * *", "--dry-run", "--json"],
     ["src/cloudflare/workflows/importer.ts", "cloudflare-worker.ts", "app/api/workflows/importer/route.ts"]
   );
 
-  smokeDryRunRecipe(
+  smokeDryRunAddOn(
     ["add", "browser-run", "--dry-run", "--json"],
     ["src/cloudflare/browser-run.ts", "app/api/browser/screenshot/route.ts"]
   );
 }
 
-function smokeDryRunRecipe(args, expectedPaths) {
+function smokeDryRunAddOn(args, expectedPaths) {
   const result = run([...args, "--cwd", fixture]);
   assertEqual(result.status, 0, result.stderr);
   const changeSet = JSON.parse(result.stdout);

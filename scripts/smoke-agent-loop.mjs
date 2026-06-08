@@ -11,7 +11,7 @@ const fixture = path.join(repoRoot, "fixtures", "next-basic");
 agentLoopReachesGreen();
 agentLoopRespectsSafety();
 
-// The end-to-end loop an agent runs: doctor -> fix (dry-run) -> apply -> verify,
+// the end-to-end loop an agent runs: doctor -> fix (dry-run) -> apply -> verify,
 // branching on exit codes. Asserts the documented codes and that the fix lands.
 function agentLoopReachesGreen() {
   const tmp = mkdtempSync(path.join(tmpdir(), "flarecel-agentloop-"));
@@ -55,7 +55,7 @@ function agentLoopReachesGreen() {
   }
 }
 
-// Safety boundary: fix must NOT silently rewrite risky source (edge runtime),
+// safety boundary: fix must NOT silently rewrite risky source (edge runtime),
 // and apply requires --yes.
 function agentLoopRespectsSafety() {
   const tmp = mkdtempSync(path.join(tmpdir(), "flarecel-agentsafety-"));
@@ -68,7 +68,7 @@ function agentLoopRespectsSafety() {
     const noYes = run(["fix", "--apply", "--json", "--cwd", tmp]);
     assertEqual(noYes.status, 5, "fix --apply without --yes should exit 5");
 
-    // After a real apply, the edge-runtime export must be untouched (flagged, not rewritten).
+    // after a real apply, the edge-runtime export must be untouched (flagged, not rewritten).
     run(["fix", "--apply", "--yes", "--json", "--cwd", tmp]);
     if (readFileSync(edgeRoute, "utf8") !== original) {
       throw new Error("fix must not silently rewrite edge-runtime source");

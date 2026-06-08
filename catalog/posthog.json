@@ -1,0 +1,21 @@
+{
+  "name": "posthog",
+  "title": "PostHog product analytics",
+  "deps": ["posthog-node"],
+  "envTypes": ["POSTHOG_PROJECT_TOKEN: string;", "POSTHOG_HOST: string;"],
+  "envExample": ["POSTHOG_PROJECT_TOKEN=phc_replace-me", "POSTHOG_HOST=https://us.i.posthog.com"],
+  "files": [
+    {
+      "path": "lib/posthog.ts",
+      "reason": "Workers-safe PostHog client (flush immediately so events are not lost on isolate shutdown)",
+      "content": "import { PostHog } from \"posthog-node\";\n\nexport interface PostHogEnv {\n  POSTHOG_PROJECT_TOKEN: string;\n  POSTHOG_HOST: string;\n}\n\n// Create one client per request. flushAt:1 + flushInterval:0 send events\n// immediately because a Worker isolate can terminate before a batch flushes.\nexport function createPostHog(env: PostHogEnv) {\n  return new PostHog(env.POSTHOG_PROJECT_TOKEN, {\n    host: env.POSTHOG_HOST,\n    flushAt: 1,\n    flushInterval: 0\n  });\n}\n"
+    }
+  ],
+  "nextActions": [
+    "npm install",
+    "Set POSTHOG_PROJECT_TOKEN and POSTHOG_HOST (wrangler.jsonc vars or secrets)",
+    "In a route: const ph = createPostHog(env); ctx.waitUntil(ph.captureImmediate({ distinctId, event: \"...\" })); ctx.waitUntil(ph.shutdown());",
+    "flarecel verify --json"
+  ],
+  "doc": "# Flarecel catalog: PostHog (Cloudflare Workers)\n\nUses `posthog-node`, which ships a `workerd` export and does not require `nodejs_compat` on its own. Create one client per request and flush immediately (`flushAt:1`, `flushInterval:0`) — batched data can be lost when a Worker isolate shuts down. Use `ctx.waitUntil(posthog.captureImmediate(...))` and `ctx.waitUntil(posthog.shutdown())` so capture completes without blocking the response.\n\nVerified against PostHog's official Cloudflare Workers docs.\n"
+}

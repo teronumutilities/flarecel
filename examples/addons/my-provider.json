@@ -1,0 +1,19 @@
+{
+  "name": "my-provider",
+  "title": "My Provider (example add-on)",
+  "deps": ["my-provider-sdk"],
+  "devDeps": ["@types/my-provider"],
+  "envTypes": ["MY_PROVIDER_API_KEY: string;", "MY_PROVIDER_REGION: string;"],
+  "envExample": ["MY_PROVIDER_API_KEY=replace-me", "MY_PROVIDER_REGION=us-east"],
+  "wrangler": { "compatibility_flags": ["nodejs_compat"] },
+  "files": [
+    {
+      "path": "lib/my-provider.ts",
+      "reason": "Workers-safe client for {{projectName}}",
+      "content": "import { Client } from \"my-provider-sdk\";\n\nexport interface MyProviderEnv {\n  MY_PROVIDER_API_KEY: string;\n  MY_PROVIDER_REGION: string;\n}\n\n// Create the client per request from the Worker binding.\nexport function createMyProvider(env: MyProviderEnv) {\n  return new Client({ apiKey: env.MY_PROVIDER_API_KEY, region: env.MY_PROVIDER_REGION });\n}\n"
+    }
+  ],
+  "warnings": ["Pin the SDK version and verify Workers compatibility before production."],
+  "nextActions": ["npm install", "wrangler secret put MY_PROVIDER_API_KEY", "flarecel verify --json"],
+  "doc": "# My Provider\n\nReplace this with real setup notes for your provider.\n"
+}

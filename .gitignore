@@ -3,3 +3,5 @@ dist
 .flarecel
 .DS_Store
 outputs
+.env
+.env.*

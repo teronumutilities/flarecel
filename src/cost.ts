@@ -1,4 +1,5 @@
 import type { ProjectContext } from "./types.js";
+import type { LoginStatus } from "./auth-status.js";
 
 export interface CostSource {
   name: string;
@@ -19,8 +20,16 @@ export interface CostLineItem {
 
 export interface CostReport {
   status: "estimate";
-  plan: "free" | "paid";
+  plan: "free" | "paid" | "unknown";
+  planAssumed: boolean;
+  planConfidence: "low" | "medium" | "high";
+  estimateIsRange: boolean;
+  usageSource: "assumed" | "cloudflare-live";
+  usageWindowDays?: number;
   currency: "USD";
+  recommendedDisplay: string;
+  recommendedEstimateKind: "single" | "range";
+  costBasis: "explicit-free" | "explicit-paid" | "live-paid" | "unknown-plan-range";
   project: {
     name: string | null;
     framework: string;
@@ -29,7 +38,12 @@ export interface CostReport {
   detectedBindings: string[];
   lineItems: CostLineItem[];
   estimatedMonthlyUsd: number;
+  estimatedMonthlyUsdLow: number;
+  estimatedMonthlyUsdHigh: number;
+  pricingVerifiedOn: string;
+  billShockRisks: string[];
   vercelComparison?: VercelComparison;
+  vercelAuth?: LoginStatus;
   warnings: string[];
   sources: CostSource[];
   nextActions: string[];
@@ -40,9 +54,12 @@ export interface VercelComparison {
   vercelMonthlyUsd: number;
   cloudflareMonthlyUsd: number;
   monthlyDeltaUsd: number;
-  source: "model" | "user-provided";
+  savingsPct: number;
+  source: "user-provided" | "vercel-cli";
   assumptions: Record<string, number | string>;
 }
+
+const PRICING_VERIFIED_ON = "2026-06-04";
 
 const SOURCES: CostSource[] = [
   {
@@ -83,14 +100,48 @@ const SOURCES: CostSource[] = [
   }
 ];
 
+export interface LiveUsage {
+  requests: number;
+  avgCpuMs: number;
+  windowDays: number;
+}
+
 export function createCostEstimate(
   ctx: ProjectContext,
-  flags: Record<string, string | boolean> = {}
+  flags: Record<string, string | boolean> = {},
+  liveUsage?: LiveUsage
 ): CostReport {
-  const plan = stringFlag(flags, "plan") === "free" ? "free" : "paid";
-  const dynamicRequests = numberFlag(flags, "requests", 1_000_000);
+  const planFlag = stringFlag(flags, "plan");
+  const explicitPlan = planFlag === "free" || planFlag === "paid";
+  // planAssumed stays true whenever the user did not explicitly pass --plan,
+  // including the live path where we assume the conservative paid floor.
+  const planAssumed = !explicitPlan;
+  const usageSource = liveUsage ? "cloudflare-live" : "assumed";
+
+  // plan resolution. We refuse to confidently assume Workers Paid when we have
+  // no signal: explicit --plan wins; --cloudflare-live (real usage) takes the
+  // conservative paid floor; otherwise the plan is honestly UNKNOWN.
+  let plan: "free" | "paid" | "unknown";
+  let planConfidence: "low" | "medium" | "high";
+  if (planFlag === "free") {
+    plan = "free";
+    planConfidence = liveUsage ? "high" : "medium";
+  } else if (planFlag === "paid") {
+    plan = "paid";
+    planConfidence = liveUsage ? "high" : "medium";
+  } else if (liveUsage) {
+    plan = "paid";
+    planConfidence = "high";
+  } else {
+    plan = "unknown";
+    planConfidence = "low";
+  }
+  // live Workers usage (real requests + CPU from your account) overrides the
+  // assumed defaults. Other bindings still use flags until their live meters
+  // are wired, so they stay clearly assumed.
+  const dynamicRequests = liveUsage ? Math.round(liveUsage.requests) : numberFlag(flags, "requests", 1_000_000);
   const staticRequests = numberFlag(flags, "static-requests", 0);
-  const avgCpuMs = numberFlag(flags, "cpu-ms", 7);
+  const avgCpuMs = liveUsage ? liveUsage.avgCpuMs : numberFlag(flags, "cpu-ms", 7);
   const r2StorageGb = numberFlag(flags, "r2-storage-gb", 0);
   const r2ClassA = numberFlag(flags, "r2-class-a", 0);
   const r2ClassB = numberFlag(flags, "r2-class-b", 0);
@@ -123,10 +174,20 @@ export function createCostEstimate(
     "This is an estimate for planning, not a billing guarantee.",
     "Cloudflare pricing changes over time. Re-check source URLs before making business decisions."
   ];
+  if (liveUsage) {
+    warnings.push(`Workers, R2, D1, and KV usage are your REAL numbers from the last ${liveUsage.windowDays} days (Cloudflare GraphQL Analytics), priced with published rates. Bindings with no recorded usage show zero. Other products not yet wired stay assumptions.`);
+  }
   const detectedBindings = detectBillableBindings(ctx);
 
+  // Workers platform charges. The $5 Paid subscription is only a real line item
+  // when we know (or assume via --cloudflare-live) the Paid plan. For an UNKNOWN
+  // plan we keep request/CPU OVERAGE math (so heavy usage still shows) but fold
+  // the $5 floor into the range high instead of asserting it as a fact. Free
+  // bills no overage — it caps — so it gets neither.
   if (plan === "paid") {
     lineItems.push(fixed("workers-paid-subscription", "Workers Paid minimum monthly charge", 5));
+  }
+  if (plan === "paid" || plan === "unknown") {
     lineItems.push(metered(
       "workers-requests",
       "Dynamic Worker requests",
@@ -145,7 +206,11 @@ export function createCostEstimate(
       0.02,
       1_000_000
     ));
-  } else {
+  }
+  if (plan === "unknown") {
+    warnings.push("Plan is UNKNOWN \u2014 Flarecel did not detect or assume a Cloudflare plan. Workers Free may be $0/mo for testing and low traffic; Workers Paid starts at $5/mo before usage. The figure below is a baseline range, not a single guaranteed number. Pass --plan free or --plan paid to pin it, or --cloudflare-live to price real account usage.");
+  }
+  if (plan === "free" || plan === "unknown") {
     if (dynamicRequests > 3_000_000) {
       warnings.push("Workers Free has a 100,000 requests/day limit. Monthly totals above roughly 3,000,000 may fail instead of billing overage.");
     }
@@ -222,17 +287,84 @@ export function createCostEstimate(
   }
 
   const compare = stringFlag(flags, "compare");
-  const cloudflareMonthlyUsd = roundUsd(lineItems.reduce((total, item) => total + item.estimatedUsd, 0));
+
+  // money model. The $5 base fee is only a real line item on the Paid plan;
+  // everything else is usage/overage. Splitting them lets the range model
+  // "Free might be $0" vs "Paid floor + overage" honestly instead of asserting
+  // a single confident number.
+  const lineItemsTotalUsd = roundUsd(lineItems.reduce((total, item) => total + item.estimatedUsd, 0));
+  const baseFeeUsd = lineItems
+    .filter((item) => item.id === "workers-paid-subscription")
+    .reduce((total, item) => total + item.estimatedUsd, 0);
+  const variableUsd = roundUsd(lineItemsTotalUsd - baseFeeUsd);
+
+  let estimatedMonthlyUsd: number;
+  let estimatedMonthlyUsdLow: number;
+  let estimatedMonthlyUsdHigh: number;
+  if (plan === "paid") {
+    // conservative explicit estimate: $5 floor + usage. Unchanged from before.
+    estimatedMonthlyUsd = roundUsd(baseFeeUsd + variableUsd);
+    estimatedMonthlyUsdLow = roundUsd(baseFeeUsd + variableUsd * 0.5);
+    estimatedMonthlyUsdHigh = roundUsd(baseFeeUsd + variableUsd * 2);
+  } else if (plan === "free") {
+    // free tier has no base fee. Overage-prone usage is shown as the high end.
+    estimatedMonthlyUsd = roundUsd(variableUsd);
+    estimatedMonthlyUsdLow = 0;
+    estimatedMonthlyUsdHigh = roundUsd(variableUsd * 2);
+  } else {
+    // unknown plan: honest baseline range. Low assumes Free ($0 may be enough);
+    // high assumes the Paid $5 floor plus headroom on usage. The headline leads
+    // with the $5 floor so we never under-promise, but estimateIsRange flags
+    // that this is a range, not a guaranteed single number.
+    estimatedMonthlyUsd = roundUsd(5 + variableUsd);
+    estimatedMonthlyUsdLow = 0;
+    estimatedMonthlyUsdHigh = roundUsd(5 + variableUsd * 2);
+  }
+  const estimateIsRange = estimatedMonthlyUsdHigh !== estimatedMonthlyUsdLow;
+  const recommendedEstimateKind: CostReport["recommendedEstimateKind"] = plan === "unknown" ? "range" : "single";
+  const recommendedDisplay = plan === "unknown"
+    ? `${usd(estimatedMonthlyUsdLow)} - ${usd(estimatedMonthlyUsdHigh)}/mo`
+    : `${usd(estimatedMonthlyUsd)}/mo`;
+  const costBasis: CostReport["costBasis"] = plan === "unknown"
+    ? "unknown-plan-range"
+    : plan === "free"
+      ? "explicit-free"
+      : liveUsage
+        ? "live-paid"
+        : "explicit-paid";
+  // Vercel comparison weighs against the honest headline estimate.
+  const cloudflareMonthlyUsd = estimatedMonthlyUsd;
+
+  const billShockRisks = detectBillShockRisks(detectedBindings);
+  for (const risk of billShockRisks) warnings.push(risk);
+
+  // ground the estimate in the app's actual shape when the user is on defaults.
+  const usingDefaultTraffic = typeof flags["requests"] !== "string";
+  if (usingDefaultTraffic && ctx.routeCount > 0) {
+    warnings.push(`Detected ${ctx.routeCount} route(s) (${ctx.apiRouteCount} dynamic/API). Traffic is assumed, not measured \u2014 pass --requests to match your real volume.`);
+  }
   let vercelComparison: VercelComparison | undefined;
   if (compare === "vercel") {
     vercelComparison = buildVercelComparison(flags, cloudflareMonthlyUsd);
-    warnings.push(vercelComparison.disclaimer);
+    if (vercelComparison) {
+      warnings.push(vercelComparison.disclaimer);
+    } else {
+      warnings.push("Vercel comparison skipped: pass --vercel-monthly-usd with your real bill, or use --vercel-live with an authenticated Vercel CLI. Flarecel does not invent Vercel bills.");
+    }
   }
 
   return {
     status: "estimate",
     plan,
+    planAssumed,
+    planConfidence,
+    estimateIsRange,
+    usageSource,
+    usageWindowDays: liveUsage?.windowDays,
     currency: "USD",
+    recommendedDisplay,
+    recommendedEstimateKind,
+    costBasis,
     project: {
       name: ctx.packageJson?.name ?? null,
       framework: ctx.framework
@@ -266,58 +398,59 @@ export function createCostEstimate(
       "workflow-cpu-ms/month": workflowCpuMs,
       "workflow-storage-gb": workflowStorageGb,
       "browser-run-hours/month": browserRunHours,
-      "browser-run-avg-concurrency": browserRunConcurrency
+      "browser-run-avg-concurrency": browserRunConcurrency,
+      "detected-routes": ctx.routeCount,
+      "detected-api-routes": ctx.apiRouteCount
     },
     detectedBindings,
     lineItems: lineItems.filter((item) => item.usage > 0 || item.estimatedUsd > 0 || item.id === "workers-paid-subscription"),
-    estimatedMonthlyUsd: roundUsd(lineItems.reduce((total, item) => total + item.estimatedUsd, 0)),
+    estimatedMonthlyUsd,
+    estimatedMonthlyUsdLow,
+    estimatedMonthlyUsdHigh,
+    pricingVerifiedOn: PRICING_VERIFIED_ON,
+    billShockRisks,
     vercelComparison,
     warnings,
     sources: SOURCES,
-    nextActions: [
-      "Adjust usage flags for your expected traffic.",
-      "Run flarecel deploy --preview --yes before production."
-    ]
+    nextActions: costNextActions(compare === "vercel" && !vercelComparison)
   };
 }
 
 const VERCEL_DISCLAIMER =
-  "EXPERIMENTAL estimate, not a quote. Vercel and Cloudflare bills depend on real usage, regions, and plan changes. Use each provider's own calculator before making decisions.";
+  "EXPERIMENTAL comparison, not a quote. Cloudflare bills depend on real usage, regions, and plan changes. Use each provider's own calculator before making decisions.";
 
 function buildVercelComparison(
   flags: Record<string, string | boolean>,
   cloudflareMonthlyUsd: number
-): VercelComparison {
+): VercelComparison | undefined {
+  const withDelta = (vercelMonthlyUsd: number, source: VercelComparison["source"], assumptions: Record<string, number | string>): VercelComparison => {
+    const monthlyDeltaUsd = roundUsd(vercelMonthlyUsd - cloudflareMonthlyUsd);
+    const savingsPct = vercelMonthlyUsd > 0 ? Math.round((monthlyDeltaUsd / vercelMonthlyUsd) * 100) : 0;
+    return { disclaimer: VERCEL_DISCLAIMER, vercelMonthlyUsd: roundUsd(vercelMonthlyUsd), cloudflareMonthlyUsd, monthlyDeltaUsd, savingsPct, source, assumptions };
+  };
+
   const override = numberFlag(flags, "vercel-monthly-usd", -1);
   if (override >= 0) {
-    return {
-      disclaimer: VERCEL_DISCLAIMER,
-      vercelMonthlyUsd: roundUsd(override),
-      cloudflareMonthlyUsd,
-      monthlyDeltaUsd: roundUsd(override - cloudflareMonthlyUsd),
-      source: "user-provided",
-      assumptions: { "vercel-monthly-usd": roundUsd(override) }
-    };
+    return withDelta(override, "user-provided", { "vercel-monthly-usd": roundUsd(override) });
   }
 
-  // Labeled Vercel Pro model: $20/seat/month. Metered usage assumed within plan.
-  const seats = numberFlag(flags, "vercel-seats", 1);
-  const seatUsd = 20;
-  const vercelMonthlyUsd = roundUsd(seats * seatUsd);
+  const live = numberFlag(flags, "vercel-live-usd", -1);
+  if (live >= 0) {
+    return withDelta(live, "vercel-cli", { "vercel-monthly-usd": roundUsd(live), source: "vercel usage --format json" });
+  }
 
-  return {
-    disclaimer: VERCEL_DISCLAIMER,
-    vercelMonthlyUsd,
-    cloudflareMonthlyUsd,
-    monthlyDeltaUsd: roundUsd(vercelMonthlyUsd - cloudflareMonthlyUsd),
-    source: "model",
-    assumptions: {
-      "vercel-plan": "Pro",
-      "vercel-seats": seats,
-      "vercel-seat-usd": seatUsd,
-      note: "Seat fee only; included usage assumed to cover metered usage. Pass --vercel-monthly-usd to use your real bill."
-    }
-  };
+  return undefined;
+}
+
+function costNextActions(needsVercelBill: boolean): string[] {
+  const actions = [
+    "Adjust usage flags for your expected traffic.",
+    "Run flarecel deploy --preview --yes before production."
+  ];
+  if (needsVercelBill) {
+    actions.unshift("For Vercel comparison, pass --vercel-monthly-usd <amount> or --vercel-live.");
+  }
+  return actions;
 }
 
 function fixed(id: string, label: string, estimatedUsd: number): CostLineItem {
@@ -385,6 +518,20 @@ function vectorizeLineItems(queries: number, storedVectors: number, dimensions: 
   ];
 }
 
+// bindings whose cost scales with traffic/load and can spike unexpectedly.
+const SPIKE_PRONE: Record<string, string> = {
+  "workers-ai": "Workers AI bills per neuron \u2014 a viral spike or prompt-heavy traffic can multiply this fast.",
+  "durable-objects": "Durable Objects bill for duration + requests; long-lived or chatty objects can climb quickly.",
+  vectorize: "Vectorize bills per queried dimension; large indexes or high query volume scale steeply.",
+  "browser-run": "Browser Run bills per browser-hour; unbounded headless automation can run up cost.",
+  workflows: "Workflows bill per request + CPU; retries and long runs add up.",
+  queues: "Queues bill per operation; a backlog or retry storm can inflate operation counts."
+};
+
+function detectBillShockRisks(detectedBindings: string[]): string[] {
+  return detectedBindings.filter((b) => SPIKE_PRONE[b]).map((b) => `BILL-SHOCK RISK: ${SPIKE_PRONE[b]}`);
+}
+
 function detectBillableBindings(ctx: ProjectContext): string[] {
   const config = ctx.wrangler.data;
   if (!config) return [];
@@ -432,4 +579,8 @@ function stringFlag(flags: Record<string, string | boolean>, name: string): stri
 
 function roundUsd(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function usd(value: number): string {
+  return `$${value.toFixed(2)}`;
 }

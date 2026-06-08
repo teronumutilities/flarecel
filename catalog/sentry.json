@@ -1,0 +1,23 @@
+{
+  "name": "sentry",
+  "title": "Sentry error tracking",
+  "deps": ["@sentry/cloudflare"],
+  "envTypes": ["SENTRY_DSN: string;"],
+  "envExample": ["SENTRY_DSN=replace-me"],
+  "wrangler": { "compatibility_flags": ["nodejs_compat"] },
+  "files": [
+    {
+      "path": "lib/sentry.ts",
+      "reason": "Sentry options factory for wrapping a Worker with withSentry",
+      "content": "import type { CloudflareOptions } from \"@sentry/cloudflare\";\n\nexport interface SentryEnv {\n  SENTRY_DSN: string;\n}\n\n// Pass the result to withSentry() in your worker entry:\n//   import * as Sentry from \"@sentry/cloudflare\";\n//   export default Sentry.withSentry(sentryOptions, handler);\nexport function sentryOptions(env: SentryEnv): CloudflareOptions {\n  return {\n    dsn: env.SENTRY_DSN,\n    tracesSampleRate: 1.0,\n    sendDefaultPii: false\n  };\n}\n"
+    }
+  ],
+  "warnings": ["Requires the nodejs_compat flag (added to wrangler.jsonc by this add-on)."],
+  "nextActions": [
+    "npm install",
+    "wrangler secret put SENTRY_DSN",
+    "Wrap your worker entry: export default Sentry.withSentry(sentryOptions, handler)",
+    "flarecel verify --json"
+  ],
+  "doc": "# Flarecel catalog: Sentry (Cloudflare Workers)\n\nUses `@sentry/cloudflare`. Sentry's Workers SDK requires the `nodejs_compat` flag (this add-on adds it). Wrap your worker's exported handler with `Sentry.withSentry(sentryOptions(env), handler)`. For Next.js on Cloudflare, follow Sentry's Next.js-on-Cloudflare guide for the build-time wiring.\n\nVerified against Sentry's official Cloudflare platform docs.\n"
+}

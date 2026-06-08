@@ -1,6 +1,6 @@
 {
   "name": "flarecel",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.0",
   "description": "Agent-friendly Cloudflare Workers deployment assistant.",
   "type": "module",
   "bin": {
@@ -8,6 +8,8 @@
   },
   "files": [
     "dist",
+    "catalog",
+    "examples",
     "README.md",
     "AGENTS.md"
   ],
@@ -15,20 +17,29 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "npm run build && node dist/cli.js --help && node dist/cli.js doctor --json --cwd fixtures/next-basic; test $? -eq 2",
-    "smoke:mcp": "npm run build && printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}' | node dist/cli.js mcp | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d);process.stdin.on(\"end\",()=>{if(!s.includes(\"plan_provisioning\") || !s.includes(\"estimate_cost\") || !s.includes(\"deploy_preview\")) process.exit(1);})'",
+    "smoke:exec": "npm run build && node scripts/smoke-exec-timeout.mjs",
+    "smoke:mcp": "npm run build && printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}' | node dist/cli.js mcp | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d);process.stdin.on(\"end\",()=>{for (const name of [\"plan_provisioning\",\"estimate_cost\",\"deploy_preview\",\"audit_env\",\"plan_secrets\"]) if(!s.includes(name)) process.exit(1);})'",
     "smoke:auth": "npm run build && node dist/cli.js add auth better-auth --db d1 --orm drizzle --dry-run --json --cwd fixtures/next-basic | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d);process.stdin.on(\"end\",()=>{const j=JSON.parse(s); const counts={}; for (const c of j.changes) counts[c.path]=(counts[c.path]||0)+1; if(Object.values(counts).some(n=>n>1)) process.exit(1); if(!j.changes.some(c=>c.path===\"app/api/auth/[...all]/route.ts\")) process.exit(1);})'",
-    "smoke:recipes": "npm run build && node scripts/smoke-recipes.mjs",
+    "smoke:addons": "npm run build && node scripts/smoke-addons.mjs",
     "smoke:deploy-cost": "npm run build && node scripts/smoke-deploy-cost.mjs",
     "smoke:redact": "npm run build && node scripts/smoke-redact.mjs",
-    "smoke:kit": "npm run build && node scripts/smoke-kit.mjs",
+    "smoke:compose": "npm run build && node scripts/smoke-compose.mjs",
     "smoke:providers": "npm run build && node scripts/smoke-providers.mjs",
     "smoke:byebye": "npm run build && node scripts/smoke-byebye.mjs",
+    "smoke:env-migrate": "npm run build && node scripts/smoke-env-migrate.mjs",
     "smoke:agent-loop": "npm run build && node scripts/smoke-agent-loop.mjs",
-    "test": "npm run smoke && npm run smoke:mcp && npm run smoke:auth && npm run smoke:recipes && npm run smoke:deploy-cost && npm run smoke:redact && npm run smoke:kit && npm run smoke:providers && npm run smoke:byebye && npm run smoke:agent-loop",
+    "smoke:openai-batch": "npm run build && node scripts/smoke-openai-batch.mjs",
+    "smoke:menu": "npm run build && node scripts/smoke-menu.mjs",
+    "smoke:cloudflare": "npm run build && node scripts/smoke-cloudflare.mjs",
+    "smoke:user-addons": "npm run build && node scripts/smoke-user-addons.mjs",
+    "smoke:rollback": "npm run build && node scripts/smoke-rollback.mjs",
+    "smoke:remote-addons": "npm run build && node scripts/smoke-remote-addons.mjs",
+    "test": "npm run smoke && npm run smoke:exec && npm run smoke:mcp && npm run smoke:auth && npm run smoke:addons && npm run smoke:deploy-cost && npm run smoke:redact && npm run smoke:compose && npm run smoke:providers && npm run smoke:byebye && npm run smoke:env-migrate && npm run smoke:agent-loop && npm run smoke:openai-batch && npm run smoke:menu && npm run smoke:cloudflare && npm run smoke:user-addons && npm run smoke:rollback && npm run smoke:remote-addons",
     "doctor": "node dist/cli.js doctor",
     "update-versions": "node scripts/update-versions.mjs",
     "verify:providers": "npm run build && node scripts/verify-providers.mjs",
-    "verify:runtime": "node scripts/verify-runtime.mjs"
+    "verify:runtime": "node scripts/verify-runtime.mjs",
+    "test:cloudflare-live": "npm run build && node scripts/integration-cloudflare-live.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.29",

@@ -1,0 +1,21 @@
+{
+  "name": "anthropic",
+  "title": "Anthropic Claude API client",
+  "deps": ["@anthropic-ai/sdk"],
+  "envTypes": ["ANTHROPIC_API_KEY: string;"],
+  "envExample": ["ANTHROPIC_API_KEY=replace-me"],
+  "files": [
+    {
+      "path": "lib/anthropic.ts",
+      "reason": "Workers-safe Anthropic client (fetch-based SDK)",
+      "content": "import Anthropic from \"@anthropic-ai/sdk\";\n\nexport interface AnthropicEnv {\n  ANTHROPIC_API_KEY: string;\n}\n\n// The @anthropic-ai/sdk uses the global fetch and runs on Workers. Create the\n// client per request from the binding.\nexport function createAnthropic(env: AnthropicEnv) {\n  return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });\n}\n"
+    }
+  ],
+  "nextActions": [
+    "npm install",
+    "wrangler secret put ANTHROPIC_API_KEY",
+    "Optional: route through Cloudflare AI Gateway by setting baseURL",
+    "flarecel verify --json"
+  ],
+  "doc": "# Flarecel catalog: Anthropic (Cloudflare Workers)\n\nUses the official `@anthropic-ai/sdk`, which is fetch-based and runs on Workers without `nodejs_compat`. Create the client per request from `env.ANTHROPIC_API_KEY`. Route through Cloudflare AI Gateway (via `baseURL`) for caching and spend visibility.\n\nKeep the API key in a Worker secret, never in client code.\n"
+}

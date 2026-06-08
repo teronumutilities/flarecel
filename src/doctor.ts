@@ -24,14 +24,15 @@ export function runDoctor(ctx: ProjectContext): DoctorReport {
       id: "unknown-framework",
       severity: "blocking",
       title: "Framework not recognized yet",
-      message: "This MVP supports detection for Next.js, Vite, Astro, Remix, SvelteKit, Hono, and TanStack Start.",
+      message: "This MVP supports detection for Next.js, Vite, Astro, Remix, SvelteKit, Hono, TanStack Start, and Cloudflare-native Workers/Pages apps.",
       fixable: false
     }));
+    return report(ctx, issues);
   }
 
   if (ctx.framework === "nextjs") {
     checkNextProject(ctx, issues);
-  } else if (ctx.framework !== "unknown") {
+  } else {
     checkGenericCloudflareProject(ctx, issues);
   }
 
@@ -65,7 +66,7 @@ function checkNextProject(ctx: ProjectContext, issues: Issue[]): void {
       title: "OpenNext Cloudflare adapter missing",
       message: "Next.js should deploy to Cloudflare Workers through @opennextjs/cloudflare.",
       fixable: true,
-      recipe: "next-opennext",
+      addOn: "next-opennext",
       recommendedCommand: "flarecel add next-opennext --dry-run --format patch"
     }));
   }
@@ -77,7 +78,7 @@ function checkNextProject(ctx: ProjectContext, issues: Issue[]): void {
       title: "Wrangler config missing",
       message: "Cloudflare Workers needs wrangler.jsonc to define the Worker entry, assets, compatibility flags, and bindings.",
       fixable: true,
-      recipe: "next-opennext",
+      addOn: "next-opennext",
       recommendedCommand: "flarecel fix --dry-run --format patch"
     }));
   } else if (ctx.wrangler.format === "toml") {
@@ -109,7 +110,7 @@ function checkNextProject(ctx: ProjectContext, issues: Issue[]): void {
         message: "OpenNext Cloudflare expects Node.js APIs from the Workers runtime. Add the nodejs_compat compatibility flag.",
         file: relative(ctx, ctx.wrangler.path),
         fixable: true,
-        recipe: "next-opennext",
+        addOn: "next-opennext",
         recommendedCommand: "flarecel fix --dry-run --format patch"
       }));
     }
@@ -122,7 +123,7 @@ function checkNextProject(ctx: ProjectContext, issues: Issue[]): void {
         message: "OpenNext recommends this flag so app fetches are handled safely in Workers.",
         file: relative(ctx, ctx.wrangler.path),
         fixable: true,
-        recipe: "next-opennext",
+        addOn: "next-opennext",
         recommendedCommand: "flarecel fix --dry-run --format patch"
       }));
     }
@@ -173,7 +174,7 @@ function checkPackageRisks(ctx: ProjectContext, issues: Issue[]): void {
     {
       name: "bcrypt",
       severity: "high",
-      message: "bcrypt usually depends on native Node modules. Prefer bcryptjs, Web Crypto, or a Workers-compatible auth recipe."
+      message: "bcrypt usually depends on native Node modules. Prefer bcryptjs, Web Crypto, or a Workers-compatible auth add-on."
     },
     {
       name: "sharp",
@@ -268,7 +269,7 @@ function checkAuthSecrets(ctx: ProjectContext, issues: Issue[]): void {
     routeCandidates.some((candidate) => existsSync(path.join(ctx.cwd, candidate)));
   if (!usesBetterAuth) return;
 
-  // A declared binding type or a set local/Wrangler secret both satisfy this.
+  // a declared binding type or a set local/Wrangler secret both satisfy this.
   const envTypes = readTextSync(path.join(ctx.cwd, "cloudflare-env.d.ts"));
   const devVars = readTextSync(path.join(ctx.cwd, ".dev.vars"));
   const declared =
@@ -296,7 +297,11 @@ function readTextSync(filePath: string): string | null {
 
 function report(ctx: ProjectContext, issues: Issue[]): DoctorReport {
   const status = statusFromIssues(issues);
-  const score = readinessScore(issues);
+  // an unsupported project can't be meaningfully scored: doctor bails at
+  // framework detection before running the real readiness checks, so the only
+  // issue present is `unknown-framework`. Reporting `100 - 35 = 65` there reads
+  // as "65% ready" when the truth is "not assessable". Pin it to 0.
+  const score = status === "unsupported" ? 0 : readinessScore(issues);
   const nextActions = buildNextActions(issues, status);
 
   return {
@@ -366,4 +371,3 @@ function issue(input: Issue): Issue {
 function relative(ctx: ProjectContext, filePath: string): string {
   return path.relative(ctx.cwd, filePath);
 }
-

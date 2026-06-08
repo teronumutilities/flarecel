@@ -29,7 +29,7 @@ export function createDeployPlan(ctx: ProjectContext, options: DeployOptions): D
   const command = deployCommand(ctx, options.mode);
   const warnings: string[] = [];
 
-  if (verify.status === "blocking" || verify.status === "unsupported") {
+  if (verify.status === "blocking" || verify.status === "unsupported" || verify.status === "secrets-missing") {
     warnings.push("Deploy is blocked until verification passes.");
   }
 
@@ -42,7 +42,7 @@ export function createDeployPlan(ctx: ProjectContext, options: DeployOptions): D
     warnings.push("Flarecel could not determine a deploy command for this project.");
   }
 
-  const status = verify.status === "blocking" || verify.status === "unsupported" || command.length === 0
+  const status = verify.status === "blocking" || verify.status === "unsupported" || verify.status === "secrets-missing" || command.length === 0
     ? "blocked"
     : "planned";
 
@@ -54,10 +54,12 @@ export function createDeployPlan(ctx: ProjectContext, options: DeployOptions): D
     requiresConfirmation: true,
     verifyStatus: verify.status,
     verify,
-    cost: options.mode === "production" ? createCostEstimate(ctx) : undefined,
+    // production deploys assume the conservative Paid floor on purpose: a
+    // pre-production gate should over-state, not under-state, the bill.
+    cost: options.mode === "production" ? createCostEstimate(ctx, { plan: "paid" }) : undefined,
     warnings,
     nextActions: status === "blocked"
-      ? ["flarecel verify --json", "flarecel fix --dry-run --format patch"]
+      ? verify.nextActions
       : [
         options.mode === "production"
           ? "flarecel deploy --production --yes"
@@ -85,7 +87,7 @@ export async function executeDeployPlan(ctx: ProjectContext, report: DeployRepor
   if (report.status === "blocked") return report;
 
   const [command, ...args] = report.command;
-  const result = await runCommand(command, args, ctx.cwd);
+  const result = await runCommand(command, args, ctx.cwd, { timeoutMs: 10 * 60_000 });
 
   const succeeded = result.code === 0;
   return {
@@ -100,8 +102,24 @@ export async function executeDeployPlan(ctx: ProjectContext, report: DeployRepor
       ? report.mode === "production"
         ? ["Monitor the deployment in Cloudflare dashboard.", "flarecel cost --json"]
         : ["Review the uploaded preview version.", "flarecel deploy --production --yes"]
-      : ["Review stderr.", "flarecel verify --json"]
+      : deployFailureNextActions(report, result.stderr || result.stdout)
   };
+}
+
+function deployFailureNextActions(report: DeployReport, output: string): string[] {
+  if (report.mode === "preview" && isMissingWorkerError(output)) {
+    return [
+      "This Worker does not exist yet, so Cloudflare cannot upload a preview version.",
+      "Bootstrap it once with flarecel deploy --production --yes, then retry flarecel deploy --preview --yes.",
+      "If you have multiple Cloudflare accounts, set account_id in wrangler config or CLOUDFLARE_ACCOUNT_ID."
+    ];
+  }
+
+  return ["Review stderr.", "flarecel verify --json"];
+}
+
+function isMissingWorkerError(output: string): boolean {
+  return /\b10007\b/.test(output) || /Worker does not exist/i.test(output);
 }
 
 function deployCommand(ctx: ProjectContext, mode: "preview" | "production"): string[] {
@@ -113,7 +131,7 @@ function deployCommand(ctx: ProjectContext, mode: "preview" | "production"): str
 
   return mode === "production"
     ? ["npx", "wrangler", "deploy"]
-    : ["npx", "wrangler", "versions", "upload"];
+    : ["npx", "wrangler", "versions", "upload", "--preview-alias", "flarecel-preview"];
 }
 
 function packageManagerRun(packageManager: PackageManager, scriptName: string): string[] {

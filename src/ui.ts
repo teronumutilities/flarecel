@@ -1,6 +1,6 @@
-// Presentation layer. ZERO dependencies, ZERO app logic.
-// The ONLY module allowed to emit ANSI styling. output.ts is its only consumer.
-// Color auto-disables when piped, under NO_COLOR, or via setColorEnabled(false),
+// presentation layer. ZERO dependencies, ZERO app logic.
+// the ONLY module allowed to emit ANSI styling. output.ts is its only consumer.
+// color auto-disables when piped, under NO_COLOR, or via setColorEnabled(false),
 // so JSON / patch / MCP output is never contaminated. FORCE_COLOR forces it on.
 
 let enabled = detectColor();
@@ -36,7 +36,10 @@ export const c = {
   magenta: wrap(35, 39),
   cyan: wrap(36, 39),
   gray: wrap(90, 39),
-  orange: wrap256(208), // Cloudflare-ish
+  orange: wrap256(208), // cloudflare-ish
+  softWhite: wrap256(255),
+  silver: wrap256(250),
+  mutedWhite: wrap256(247),
   white: wrap(97, 39)
 };
 
@@ -51,12 +54,17 @@ export const sym = {
   dot: "\u00b7"
 };
 
+// Unicode shade ramp: empty -> light -> medium -> dark -> solid. Used for
+// gradient bar edges and the boot dissolve. Index 0 is a space on purpose so
+// callers can treat it as a single continuous ramp.
+export const SHADE = [" ", "\u2591", "\u2592", "\u2593", "\u2588"] as const;
+
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
-function visibleWidth(text: string): number {
+export function visibleWidth(text: string): number {
   return text.replace(ANSI_RE, "").length;
 }
 
-// Brand line (kept simple to avoid emoji-width misalignment).
+// brand line (kept simple to avoid emoji-width misalignment).
 export function banner(subtitle: string): string {
   const mark = c.bold(c.orange("flarecel"));
   return `${mark} ${c.dim(sym.dot)} ${c.dim(subtitle)}`;
@@ -70,27 +78,68 @@ export function rule(width = 44): string {
   return c.gray("\u2500".repeat(width));
 }
 
-// Rounded box around already-styled lines. Width computed on visible text.
+// rounded box around already-styled lines. Width computed on visible text.
 export function box(lines: string[]): string {
-  const inner = Math.max(0, ...lines.map(visibleWidth));
+  // clamp the box to the terminal so a single long line can't blow it past the
+  // viewport (which makes the borders wrap and look broken). 4 = two borders +
+  // two padding spaces.
+  const maxInner = Math.max(20, (process.stdout.columns ?? 80) - 4);
+  const wrapped = lines.flatMap((line) => wrapAnsiLine(line, maxInner));
+  const inner = Math.max(0, ...wrapped.map(visibleWidth));
   const top = c.gray(`\u256d${"\u2500".repeat(inner + 2)}\u256e`);
   const bottom = c.gray(`\u2570${"\u2500".repeat(inner + 2)}\u256f`);
-  const body = lines.map((line) => {
+  const body = wrapped.map((line) => {
     const pad = " ".repeat(inner - visibleWidth(line));
     return `${c.gray("\u2502")} ${line}${pad} ${c.gray("\u2502")}`;
   });
   return [top, ...body, bottom].join("\n");
 }
 
-// Score bar colored by value.
-export function bar(value: number, max = 100, width = 20): string {
-  const ratio = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
-  const filled = Math.round(ratio * width);
-  const paint = value >= 80 ? c.green : value >= 50 ? c.yellow : c.red;
-  return `${paint("\u2588".repeat(filled))}${c.gray("\u2591".repeat(width - filled))} ${c.bold(`${value}`)}${c.dim(`/${max}`)}`;
+// word-wrap to a visible-width budget, ignoring ANSI for measurement. Splits on
+// spaces (long unbreakable tokens are hard-split) so styled segments stay intact.
+function wrapAnsiLine(line: string, width: number): string[] {
+  if (visibleWidth(line) <= width) return [line];
+  const words = line.split(" ");
+  const rows: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (visibleWidth(candidate) <= width) {
+      current = candidate;
+      continue;
+    }
+    if (current) rows.push(current);
+    if (visibleWidth(word) <= width) {
+      current = word;
+    } else {
+      // hard-split a token longer than the budget (e.g. a URL).
+      let rest = word;
+      while (visibleWidth(rest) > width) {
+        rows.push(rest.slice(0, width));
+        rest = rest.slice(width);
+      }
+      current = rest;
+    }
+  }
+  if (current) rows.push(current);
+  return rows;
 }
 
-// Colored status word for report.status values.
+// score bar colored by value. The fill edge gets a single shaded cell so the
+// solid->empty transition reads as a gradient (█▓▒░) instead of a hard step.
+export function bar(value: number, max = 100, width = 20): string {
+  const ratio = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
+  const exact = ratio * width;
+  const filled = Math.floor(exact);
+  const paint = value >= 80 ? c.green : value >= 50 ? c.yellow : c.red;
+  // fractional remainder picks a shade glyph for the boundary cell.
+  const frac = exact - filled;
+  const edge = filled < width && frac > 0 ? SHADE[Math.max(1, Math.round(frac * 3))] : "";
+  const empty = Math.max(0, width - filled - edge.length);
+  return `${paint("\u2588".repeat(filled))}${edge ? paint(edge) : ""}${c.gray("\u2591".repeat(empty))} ${c.bold(`${value}`)}${c.dim(`/${max}`)}`;
+}
+
+// colored status word for report.status values.
 export function statusLabel(status: string): string {
   switch (status) {
     case "ready":
@@ -102,7 +151,10 @@ export function statusLabel(status: string): string {
     case "planned":
     case "confirmation-required":
     case "secrets-missing":
+    case "action-required":
       return c.yellow(status);
+    case "empty":
+      return c.gray(status);
     case "blocking":
     case "failed":
     case "blocked":
@@ -113,7 +165,7 @@ export function statusLabel(status: string): string {
   }
 }
 
-// Symbol+color for severities and check statuses.
+// symbol+color for severities and check statuses.
 export function severityIcon(severity: string): string {
   switch (severity) {
     case "blocking":
@@ -135,14 +187,14 @@ export function label(text: string): string {
   return c.dim(`${text}:`);
 }
 
-// Boot splash: cloud (Cloudflare) facing off the triangle (Vercel). Static,
+// boot splash: cloud (Cloudflare) facing off the triangle (Vercel). Static,
 // shown on the help screen. Color no-ops when disabled, so piped help is plain.
 export function splash(): string {
   return `${c.bold(c.orange("flarecel"))}  ${c.dim(sym.dot)}  ${c.dim("vercel vibes. cloudflare bills.")}`;
 }
 
-// Boot animation: a big orange cloud and a small triangle approach each other,
-// then vanish — leaving just the word "flarecel". No labels, no KO. Mysterious.
+// boot animation: a big orange cloud and a small triangle approach each other,
+// clash, then vanish into the word "flarecel". No labels, no KO. Mysterious.
 export async function playVersus(): Promise<void> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const LINES = 5;
@@ -161,26 +213,79 @@ export async function playVersus(): Promise<void> {
     "/________\\"
   ];
 
-  const paintCloud = (lines: string[]) => lines.map((l) => c.orange(l));
-  const paintTri = (lines: string[]) => lines.map((l) => c.white(l));
-  const W = 50;
+  const render = (lines: string[]) => lines.map((l) => `  ${l}`).join("\n") + "\n";
+  const WIDTH = 60;
+  type Paint = (text: string) => string;
+  type Cell = { ch: string; paint?: Paint };
+  type Spark = { row: number; col: number; text: string; paint: Paint };
 
-  // Each frame: render cloud at cloudX, triangle at triX within a W-wide field.
-  const frame = (cloudX: number, triX: number): string[] => {
-    const out: string[] = [];
-    for (let row = 0; row < LINES; row += 1) {
-      const cl = cloudArt[row];
-      const tr = triArt[row];
-      const gap = Math.max(0, triX - cloudX - cl.length);
-      out.push(" ".repeat(Math.max(0, cloudX)) + c.orange(cl) + " ".repeat(gap) + c.white(tr));
+  const drawArt = (canvas: Cell[][], art: string[], x: number, paint: Paint): void => {
+    for (let row = 0; row < art.length; row += 1) {
+      for (let i = 0; i < art[row].length; i += 1) {
+        const ch = art[row][i];
+        const col = x + i;
+        if (ch === " " || col < 0 || col >= WIDTH) continue;
+        canvas[row][col] = { ch, paint };
+      }
     }
-    return out;
   };
 
-  const render = (lines: string[]) => lines.map((l) => `  ${l}`).join("\n") + "\n";
+  const drawSpark = (canvas: Cell[][], spark: Spark): void => {
+    for (let i = 0; i < spark.text.length; i += 1) {
+      const col = spark.col + i;
+      if (spark.row < 0 || spark.row >= LINES || col < 0 || col >= WIDTH) continue;
+      const ch = spark.text[i];
+      if (ch === " ") continue;
+      canvas[spark.row][col] = { ch, paint: spark.paint };
+    }
+  };
 
-  // Non-TTY: just print the word big.
-  if (!process.stdout.isTTY) {
+  const emptyCanvas = (): Cell[][] => Array.from(
+    { length: LINES },
+    () => Array.from({ length: WIDTH }, () => ({ ch: " " }))
+  );
+
+  const linesFromCanvas = (canvas: Cell[][]): string[] => canvas.map((row) =>
+    row.map((cell) => cell.paint ? cell.paint(cell.ch) : cell.ch).join("").trimEnd()
+  );
+
+  const scene = (cloudX: number, triX: number, sparks: Spark[] = []): string[] => {
+    const canvas = emptyCanvas();
+    drawArt(canvas, cloudArt, cloudX, c.orange);
+    drawArt(canvas, triArt, triX, c.white);
+    for (const spark of sparks) drawSpark(canvas, spark);
+    return linesFromCanvas(canvas);
+  };
+
+  const sparksOnly = (sparks: Spark[]): string[] => {
+    const canvas = emptyCanvas();
+    for (const spark of sparks) drawSpark(canvas, spark);
+    return linesFromCanvas(canvas);
+  };
+
+  let painted = false;
+  const redraw = (lines: string[]) => {
+    if (painted) process.stdout.write(`\x1b[${LINES}A\x1b[J`);
+    else {
+      process.stdout.write("\x1b[J");
+      painted = true;
+    }
+    process.stdout.write(render(lines));
+  };
+
+  const impact = (cx: number, paint: Paint = c.yellow): Spark[] => [
+    { row: 0, col: cx - 1, text: "\\|/", paint },
+    { row: 1, col: cx - 2, text: ">|<", paint },
+    { row: 2, col: cx - 2, text: "--", paint },
+    { row: 2, col: cx, text: "\u2734", paint: (s) => c.bold(c.orange(s)) },
+    { row: 2, col: cx + 1, text: "--", paint },
+    { row: 3, col: cx - 2, text: ">|<", paint },
+    { row: 4, col: cx - 1, text: "/|\\", paint }
+  ];
+
+  // Non-TTY, or a terminal too narrow for the animation canvas (wrapping would
+  // break the cursor-up redraw and stack frames): just print the word big.
+  if (!process.stdout.isTTY || (process.stdout.columns ?? 80) < WIDTH + 2) {
     const big = [
       "\u2597\u2580\u2596\u259c                \u259c ",
       "\u2590  \u2590 \u259d\u2580\u2596\u2599\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u2590 ",
@@ -191,53 +296,103 @@ export async function playVersus(): Promise<void> {
     return;
   }
 
-  // Approach: cloud starts left, triangle starts right, they walk toward center.
-  const steps = 8;
-  const startTriX = W - 10;
   process.stdout.write("\x1b[?25l"); // hide cursor
 
-  for (let i = 0; i <= steps; i += 1) {
-    const cloudX = i * 2;
-    const triX = startTriX - i * 3;
-    if (i > 0) process.stdout.write(`\x1b[${LINES}A`); // move up to redraw
-    process.stdout.write(`\x1b[J${render(frame(cloudX, triX))}`);
-    await sleep(200);
+  const approach = [
+    [0, 46, 120],
+    [2, 43, 115],
+    [4, 40, 110],
+    [6, 37, 105],
+    [8, 34, 100],
+    [10, 32, 95],
+    [12, 30, 90],
+    [13, 28, 85],
+    [14, 27, 80]
+  ] as const;
+
+  for (const [cloudX, triX, ms] of approach) {
+    redraw(scene(cloudX, triX));
+    await sleep(ms);
   }
 
-  // EXPLOSION: expanding sparks where they collided, then fade.
-  const cx = 20; // center of collision
-  const explosionFrames = [
-    // tight burst
-    [" ", " ", `${" ".repeat(cx)}${c.yellow("\u2726")}`, " ", " "],
-    // expanding
-    [" ", `${" ".repeat(cx - 1)}${c.yellow("\u2726")} ${c.yellow("\u2726")}`, `${" ".repeat(cx - 2)}${c.orange("\u2734")} ${c.yellow("\u2726")} ${c.orange("\u2734")}`, `${" ".repeat(cx - 1)}${c.yellow("\u2726")} ${c.yellow("\u2726")}`, " "],
-    // big burst
-    [`${" ".repeat(cx - 2)}${c.yellow("*")}   ${c.yellow("*")}`, `${" ".repeat(cx - 3)}${c.orange("\u2726")}  ${c.yellow("\u2734")}  ${c.orange("\u2726")}`, `${" ".repeat(cx - 4)}${c.yellow(".")} ${c.orange("\u2726")} ${c.yellow("\u2726")} ${c.orange("\u2726")} ${c.yellow(".")}`, `${" ".repeat(cx - 3)}${c.orange("\u2726")}  ${c.yellow("\u2734")}  ${c.orange("\u2726")}`, `${" ".repeat(cx - 2)}${c.yellow("*")}   ${c.yellow("*")}`],
-    // fading
-    [`${" ".repeat(cx - 3)}${c.dim(".")}     ${c.dim(".")}`, `${" ".repeat(cx - 2)}${c.dim("\u2726")}   ${c.dim("\u2726")}`, `${" ".repeat(cx - 1)}${c.dim(".")} ${c.dim(".")}`, `${" ".repeat(cx - 2)}${c.dim("\u2726")}   ${c.dim("\u2726")}`, `${" ".repeat(cx - 3)}${c.dim(".")}     ${c.dim(".")}`],
-    // gone
-    [" ", " ", " ", " ", " "]
+  const cx = 27;
+  const clash = [
+    scene(14, 27, impact(cx, c.yellow)),
+    scene(15, 26, impact(cx, c.orange)),
+    scene(13, 29, impact(cx, c.yellow)),
+    scene(14, 27, impact(cx, (s) => c.bold(c.yellow(s))))
   ];
 
-  for (const ef of explosionFrames) {
-    process.stdout.write(`\x1b[${LINES}A\x1b[J`);
-    process.stdout.write(render(ef));
-    await sleep(150);
+  for (const lines of clash) {
+    redraw(lines);
+    await sleep(85);
+  }
+
+  const explosionFrames = [
+    sparksOnly([{ row: 2, col: cx, text: "\u2734", paint: (s) => c.bold(c.yellow(s)) }]),
+    sparksOnly([
+      { row: 1, col: cx - 2, text: "\\ | /", paint: c.yellow },
+      { row: 2, col: cx - 3, text: "--\u2734--", paint: c.orange },
+      { row: 3, col: cx - 2, text: "/ | \\", paint: c.yellow }
+    ]),
+    sparksOnly([
+      { row: 0, col: cx - 6, text: ".  \u2726     \u2726  .", paint: c.yellow },
+      { row: 1, col: cx - 5, text: "\u2726  \\ | /  \u2726", paint: c.orange },
+      { row: 2, col: cx - 7, text: "-- \u2726 \u2734 \u2726 --", paint: (s) => c.bold(c.yellow(s)) },
+      { row: 3, col: cx - 5, text: "\u2726  / | \\  \u2726", paint: c.orange },
+      { row: 4, col: cx - 6, text: ".  \u2726     \u2726  .", paint: c.yellow }
+    ]),
+    sparksOnly([
+      { row: 0, col: cx - 10, text: ".       .       .", paint: c.dim },
+      { row: 1, col: cx - 8, text: "\u2726     \u2726     \u2726", paint: c.dim },
+      { row: 2, col: cx - 5, text: ".   \u2726   .", paint: c.dim },
+      { row: 3, col: cx - 8, text: "\u2726     \u2726     \u2726", paint: c.dim },
+      { row: 4, col: cx - 10, text: ".       .       .", paint: c.dim }
+    ]),
+    sparksOnly([])
+  ];
+
+  for (const lines of explosionFrames) {
+    redraw(lines);
+    await sleep(135);
   }
 
   await sleep(200);
 
-  // Clear and show the wordmark.
+  // clear and dissolve the wordmark out of shade-block noise (░▒▓█).
   process.stdout.write(`\x1b[${LINES}A\x1b[J`);
 
-  // Just the word, BIG, understated.
+  // just the word, BIG, understated.
   const big = [
     "\u2597\u2580\u2596\u259c                \u259c ",
     "\u2590  \u2590 \u259d\u2580\u2596\u2599\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u259e\u2580\u2596\u2590 ",
     "\u259c\u2580 \u2590 \u259e\u2580\u258c\u258c  \u259b\u2580 \u258c \u2596\u259b\u2580 \u2590 ",
     "\u2590   \u2598\u259d\u2580\u2598\u2598  \u259d\u2580\u2598\u259d\u2580 \u259d\u2580\u2598 \u2598"
   ];
-  process.stdout.write(`\n${big.map((l) => `  ${c.bold(c.orange(l))}`).join("\n")}\n\n`);
+
+  // each glyph cell carries a stable random seed; rising `reveal` threshold lets
+  // cells flip from shade noise (░▒▓) to their final glyph at staggered times.
+  const seeds = big.map((line) => Array.from(line, () => Math.random()));
+  const dissolveFrame = (reveal: number): string[] => big.map((line, row) =>
+    Array.from(line, (ch, col) => {
+      if (ch === " ") return " ";
+      const seed = seeds[row][col];
+      if (seed <= reveal) return ch; // resolved to the real glyph
+      // still noise: deeper shade as it nears its reveal point.
+      return SHADE[1 + Math.min(2, Math.floor((reveal / Math.max(seed, 1e-6)) * 3))];
+    }).join("")
+  );
+
+  const dissolveSteps = [0.0, 0.25, 0.5, 0.75, 1.0];
+  let dissolvePainted = false;
+  for (const reveal of dissolveSteps) {
+    const lines = dissolveFrame(reveal);
+    if (dissolvePainted) process.stdout.write(`\x1b[${big.length + 1}A\x1b[J`);
+    dissolvePainted = true;
+    process.stdout.write(`\n${lines.map((l) => `  ${c.bold(c.orange(l))}`).join("\n")}\n`);
+    await sleep(70);
+  }
+  process.stdout.write("\n");
   process.stdout.write("\x1b[?25h"); // show cursor
 }
 
@@ -268,4 +423,3 @@ export function startSpinner(text: string): Spinner {
     }
   };
 }
-

@@ -1,9 +1,9 @@
-// Maintenance helper: keep DEP_VERSIONS in src/recipes.ts current without
+// maintenance helper: keep DEP_VERSIONS in src/addon-versions.ts current without
 // silently adopting breaking majors.
 //   node scripts/update-versions.mjs          # report only
 //   node scripts/update-versions.mjs --write  # apply same-major floor bumps
 //
-// Same-major updates are semver-safe and applied automatically. New majors are
+// same-major updates are semver-safe and applied automatically. New majors are
 // flagged but NOT changed: the recipe code that targets that API must be
 // re-verified against current docs first. Exit code 1 means a major awaits review.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -12,12 +12,12 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const repoRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const recipesPath = path.join(repoRoot, "src", "recipes.ts");
+const versionsPath = path.join(repoRoot, "src", "addon-versions.ts");
 const write = process.argv.includes("--write");
 
-const source = readFileSync(recipesPath, "utf8");
-const block = source.match(/const DEP_VERSIONS: Record<string, string> = \{([\s\S]*?)\n\};/);
-if (!block) throw new Error("DEP_VERSIONS block not found in src/recipes.ts");
+const source = readFileSync(versionsPath, "utf8");
+const block = source.match(/export const DEP_VERSIONS: Record<string, string> = \{([\s\S]*?)\n\};/);
+if (!block) throw new Error("DEP_VERSIONS block not found in src/addon-versions.ts");
 
 const entryRe = /"([^"]+)":\s*"(\^?)([0-9][^"]*)"/g;
 const major = (v) => v.split(".")[0];
@@ -53,8 +53,8 @@ while ((m = entryRe.exec(block[1]))) {
 }
 
 if (write && bumps > 0) {
-  writeFileSync(recipesPath, source.replace(block[0], `const DEP_VERSIONS: Record<string, string> = {${inner}\n};`), "utf8");
-  console.log(`\nApplied ${bumps} same-major floor bump(s) to src/recipes.ts.`);
+  writeFileSync(versionsPath, source.replace(block[0], `export const DEP_VERSIONS: Record<string, string> = {${inner}\n};`), "utf8");
+  console.log(`\nApplied ${bumps} same-major floor bump(s) to src/addon-versions.ts.`);
 }
 
 console.log(`\n${majors} new major(s) awaiting review, ${bumps} safe bump(s)${write ? " applied" : " available (run with --write)"}.`);

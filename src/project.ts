@@ -16,10 +16,20 @@ const IGNORED_DIRS = new Set([
   ".next",
   ".open-next",
   ".vercel",
+  ".wrangler",
   "dist",
+  "build",
   "node_modules",
   "coverage",
-  "out"
+  "out",
+  "fixtures",
+  "fixture",
+  "scripts",
+  "script",
+  "test",
+  "tests",
+  "__tests__",
+  "__mocks__"
 ]);
 
 export async function detectProject(cwd: string): Promise<ProjectContext> {
@@ -36,6 +46,10 @@ export async function detectProject(cwd: string): Promise<ProjectContext> {
   }
   const allDependencies = packageJson ? collectDependencies(packageJson) : {};
   const wrangler = await detectWrangler(cwd);
+  const sourceFiles = await collectSourceFiles(cwd);
+  const routeFiles = sourceFiles.filter((f) => /(^|\/)(page|route)\.(t|j)sx?$/.test(f));
+  const apiRouteCount = routeFiles.filter((f) => /(^|\/)route\.(t|j)sx?$/.test(f) || f.includes("/api/")).length;
+  const framework = await detectFramework(cwd, allDependencies, packageJson, wrangler);
 
   return {
     cwd,
@@ -45,12 +59,14 @@ export async function detectProject(cwd: string): Promise<ProjectContext> {
     packageJsonParseError,
     allDependencies,
     packageManager: await detectPackageManager(cwd),
-    framework: detectFramework(allDependencies),
+    framework,
     wrangler,
     hasVercelConfig: await exists(path.join(cwd, "vercel.json")),
     hasOpenNext: Boolean(allDependencies["@opennextjs/cloudflare"]),
     hasNextOnPages: Boolean(allDependencies["@cloudflare/next-on-pages"]),
-    sourceRisks: await scanSourceRisks(cwd)
+    sourceRisks: await scanSourceRisks(cwd),
+    routeCount: routeFiles.length,
+    apiRouteCount
   };
 }
 
@@ -167,7 +183,17 @@ async function detectWrangler(cwd: string): Promise<WranglerInfo> {
 
     const format = fileName.endsWith(".toml") ? "toml" : "jsonc";
     if (format === "toml") {
-      return { path: filePath, format, rawText, data: null, parseError: null };
+      try {
+        return { path: filePath, format, rawText, data: parseWranglerToml(rawText), parseError: null };
+      } catch (error) {
+        return {
+          path: filePath,
+          format,
+          rawText,
+          data: null,
+          parseError: error instanceof Error ? error.message : String(error)
+        };
+      }
     }
 
     try {
@@ -200,7 +226,12 @@ async function detectPackageManager(cwd: string): Promise<PackageManager> {
   return "unknown";
 }
 
-function detectFramework(dependencies: Record<string, string>): Framework {
+async function detectFramework(
+  cwd: string,
+  dependencies: Record<string, string>,
+  packageJson: PackageJson | null,
+  wrangler: WranglerInfo
+): Promise<Framework> {
   if (dependencies.next) return "nextjs";
   if (dependencies.astro) return "astro";
   if (dependencies["@remix-run/node"] || dependencies["@remix-run/react"]) return "remix";
@@ -208,7 +239,171 @@ function detectFramework(dependencies: Record<string, string>): Framework {
   if (dependencies.hono) return "hono";
   if (dependencies["@tanstack/react-start"] || dependencies["@tanstack/start"]) return "tanstack-start";
   if (dependencies.vite || dependencies["@vitejs/plugin-react"]) return "vite";
+  if (wrangler.path) {
+    const scripts = Object.values(packageJson?.scripts ?? {}).join("\n");
+    if (scripts.includes("wrangler pages") || await exists(path.join(cwd, "functions"))) return "cloudflare-pages";
+    if (scripts.includes("wrangler") || dependencies["@cloudflare/workers-types"] || wrangler.data?.main) return "cloudflare-workers";
+  }
   return "unknown";
+}
+
+function parseWranglerToml(input: string): Record<string, unknown> {
+  const data: Record<string, unknown> = {};
+  parseInlineTableArrays(input, data);
+
+  let currentObject: Record<string, unknown> = data;
+  let currentArrayTable: Record<string, unknown> | null = null;
+
+  for (const rawLine of input.split(/\r?\n/)) {
+    const line = stripTomlComment(rawLine).trim();
+    if (!line) continue;
+
+    const arraySection = line.match(/^\[\[([^\]]+)\]\]$/);
+    if (arraySection) {
+      currentArrayTable = {};
+      currentObject = currentArrayTable;
+      const parts = arraySection[1].split(".").map((part) => part.trim()).filter(Boolean);
+      const key = parts.pop();
+      if (!key) continue;
+      const parent = ensureTomlObject(data, parts);
+      const existing = parent[key];
+      if (!Array.isArray(existing)) parent[key] = [];
+      (parent[key] as Record<string, unknown>[]).push(currentArrayTable);
+      continue;
+    }
+
+    const objectSection = line.match(/^\[([^\]]+)\]$/);
+    if (objectSection) {
+      currentArrayTable = null;
+      currentObject = ensureTomlObject(data, objectSection[1].split(".").map((part) => part.trim()).filter(Boolean));
+      continue;
+    }
+
+    const assignment = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
+    if (!assignment) continue;
+    const [, rawKey, rawValue] = assignment;
+
+    // inline array-of-table assignments are handled as a whole before the
+    // line pass. Avoid overwriting them with a partial first line.
+    if (/^\[\s*(?:\{|$)/.test(rawValue.trim())) continue;
+
+    const target = rawKey.includes(".")
+      ? ensureTomlObject(currentArrayTable ?? data, rawKey.split(".").slice(0, -1))
+      : currentObject;
+    const key = rawKey.includes(".") ? rawKey.split(".").at(-1) : rawKey;
+    if (!key) continue;
+    target[key] = parseTomlValue(rawValue);
+  }
+
+  return data;
+}
+
+function parseInlineTableArrays(input: string, data: Record<string, unknown>): void {
+  const keys = [
+    "r2_buckets",
+    "d1_databases",
+    "kv_namespaces",
+    "vectorize",
+    "workflows",
+    "ratelimits",
+    "hyperdrive"
+  ];
+
+  for (const key of keys) {
+    const pattern = new RegExp(`(?:^|\\n)\\s*${key}\\s*=\\s*\\[([\\s\\S]*?)\\]\\s*(?=\\n\\s*[A-Za-z_][A-Za-z0-9_.-]*\\s*=|\\n\\s*\\[|$)`, "m");
+    const match = input.match(pattern);
+    if (!match) continue;
+    const entries = [...match[1].matchAll(/\{([^}]*)\}/g)]
+      .map((entry) => parseTomlInlineTable(entry[1]))
+      .filter((entry) => Object.keys(entry).length > 0);
+    if (entries.length > 0) data[key] = entries;
+  }
+}
+
+function parseTomlInlineTable(input: string): Record<string, unknown> {
+  const record: Record<string, unknown> = {};
+  for (const part of splitTomlList(input)) {
+    const assignment = part.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+?)\s*$/);
+    if (!assignment) continue;
+    record[assignment[1]] = parseTomlValue(assignment[2]);
+  }
+  return record;
+}
+
+function parseTomlValue(input: string): unknown {
+  const value = input.trim().replace(/,\s*$/, "");
+  const string = value.match(/^"((?:[^"\\]|\\.)*)"$/) ?? value.match(/^'([^']*)'$/);
+  if (string) return string[1].replace(/\\"/g, "\"");
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
+  if (value.startsWith("[") && value.endsWith("]")) {
+    return splitTomlList(value.slice(1, -1)).map(parseTomlValue);
+  }
+  return value;
+}
+
+function splitTomlList(input: string): string[] {
+  const values: string[] = [];
+  let current = "";
+  let quote: "\"" | "'" | null = null;
+  let escaped = false;
+  for (const char of input) {
+    if (quote) {
+      current += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ",") {
+      if (current.trim()) values.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) values.push(current.trim());
+  return values;
+}
+
+function stripTomlComment(input: string): string {
+  let quote: "\"" | "'" | null = null;
+  let escaped = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "#") return input.slice(0, index);
+  }
+  return input;
+}
+
+function ensureTomlObject(root: Record<string, unknown>, parts: string[]): Record<string, unknown> {
+  let current = root;
+  for (const part of parts) {
+    const existing = current[part];
+    if (!existing || typeof existing !== "object" || Array.isArray(existing)) current[part] = {};
+    current = current[part] as Record<string, unknown>;
+  }
+  return current;
 }
 
 async function scanSourceRisks(cwd: string): Promise<SourceRisk[]> {
@@ -287,4 +482,3 @@ async function collectSourceFiles(cwd: string): Promise<string[]> {
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
-

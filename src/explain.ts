@@ -1,5 +1,5 @@
-// Plain-language explanations of doctor issue ids, for non-technical builders.
-// Four beats each: what it is, why your app needs it, what Flarecel changes,
+// plain-language explanations of doctor issue ids, for non-technical builders.
+// four beats each: what it is, why your app needs it, what Flarecel changes,
 // is it safe / how to undo. `verifiedBy` points to the verify check that
 // confirms the fix landed, where one exists.
 export interface Explanation {
@@ -56,6 +56,14 @@ const EXPLANATIONS: Record<string, Explanation> = {
     why: "If Flarecel can't read it, it can't safely add services to it.",
     change: "Flarecel does not edit it; you fix the JSON error first.",
     safety: "No change made until the file is valid."
+  },
+  "wrangler-auth": {
+    id: "wrangler-auth",
+    what: "Wrangler is Cloudflare's command-line tool, and it needs to know which Cloudflare account to use.",
+    why: "Provisioning and deploy commands call Cloudflare APIs. Without a Wrangler login or API token, those commands fail late.",
+    change: "Flarecel runs `wrangler whoami`, preferring the project-local Wrangler and falling back to a global Wrangler on PATH.",
+    safety: "Safe — it only checks auth status. Fix locally with `wrangler login`, or in CI with `CLOUDFLARE_API_TOKEN`.",
+    verifiedBy: "wrangler-auth"
   },
   "next-on-pages-installed": {
     id: "next-on-pages-installed",

@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,75 +10,68 @@ const cli = path.join(repoRoot, "dist", "cli.js");
 const fixture = path.join(repoRoot, "fixtures", "next-basic");
 const tomlFixture = path.join(repoRoot, "fixtures", "next-toml");
 
-smokeKitSaasComposesAndApplies();
-smokeNewKits();
-smokeKitParity();
-smokeKitUnknownAndGating();
+smokeComposeMergesAndApplies();
+smokeComposeParity();
+smokeComposeErrors();
 smokeExitCodeThree();
 smokeTomlVerify();
+smokeWranglerAuthVerify();
 
-function smokeNewKits() {
-  for (const kit of ["realtime", "creator", "internal-tool"]) {
-    const result = run(["kit", kit, "--dry-run", "--json", "--cwd", fixture]);
-    assertEqual(result.status, 0, `kit ${kit}: ${result.stderr}`);
-    const changeSet = JSON.parse(result.stdout);
-    assertEqual(changeSet.status, "planned", `kit ${kit} should be planned`);
-    assertNoDuplicatePaths(changeSet);
-    assertGeneratedTypescriptParses(changeSet);
-    assertSingle(changeSet, "package.json");
-    assertSingle(changeSet, "wrangler.jsonc");
-  }
-}
-
-function smokeKitSaasComposesAndApplies() {
-  const tmp = copyFixture("flarecel-kit-saas-");
+// the core IP: composing add-ons that all touch package.json / wrangler.jsonc /
+// cloudflare-env.d.ts must accumulate into ONE merged entry per shared file,
+// not one-per-add-on (which a naive sequence of dry-run `add` calls produces).
+function smokeComposeMergesAndApplies() {
+  const tmp = copyFixture("flarecel-compose-");
   try {
-    const dryRun = run(["kit", "saas", "--dry-run", "--json", "--cwd", tmp]);
+    const stack = ["compose", "next-opennext", "+", "auth", "better-auth", "+", "r2", "uploads", "+", "queue", "emails", "+", "rate-limit", "+", "observability"];
+    const dryRun = run([...stack, "--dry-run", "--json", "--cwd", tmp]);
     assertEqual(dryRun.status, 0, dryRun.stderr);
     const changeSet = JSON.parse(dryRun.stdout);
     assertEqual(changeSet.status, "planned");
 
     assertNoDuplicatePaths(changeSet);
     assertGeneratedTypescriptParses(changeSet);
-    // Composed shared files must be single, merged entries.
     assertSingle(changeSet, "package.json");
     assertSingle(changeSet, "wrangler.jsonc");
     assertHasChange(changeSet, "app/api/auth/[...all]/route.ts");
 
     const pkg = JSON.parse(findChange(changeSet, "package.json").after);
     if (!pkg.dependencies["better-auth"] || !pkg.dependencies["drizzle-orm"]) {
-      throw new Error("Kit package.json missing composed auth/db deps.");
+      throw new Error("Composed package.json missing auth/db deps.");
     }
     if (pkg.dependencies["better-auth"] === "latest") {
-      throw new Error("Kit deps should be pinned, not 'latest'.");
+      throw new Error("Composed deps should be pinned, not 'latest'.");
     }
 
     const wrangler = JSON.parse(findChange(changeSet, "wrangler.jsonc").after);
     for (const key of ["d1_databases", "r2_buckets", "ratelimits", "queues"]) {
-      if (!wrangler[key]) throw new Error(`Kit wrangler.jsonc missing ${key}.`);
+      if (!wrangler[key]) throw new Error(`Composed wrangler.jsonc missing ${key}.`);
     }
 
-    const apply = run(["kit", "saas", "--apply", "--yes", "--json", "--cwd", tmp]);
+    const apply = run([...stack, "--apply", "--yes", "--json", "--cwd", tmp]);
     assertEqual(apply.status, 0, apply.stderr);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-function smokeKitParity() {
-  const tmp = copyFixture("flarecel-kit-parity-");
+function smokeComposeParity() {
+  const tmp = copyFixture("flarecel-compose-parity-");
   try {
-    const dryRun = run(["kit", "ai-app", "--dry-run", "--json", "--cwd", tmp]);
+    const stack = ["compose", "ai-gateway", "+", "workers-ai", "+", "vectorize", "docs-search", "+", "r2", "uploads", "+", "observability"];
+    const dryRun = run([...stack, "--dry-run", "--json", "--cwd", tmp]);
     assertEqual(dryRun.status, 0, dryRun.stderr);
     const changeSet = JSON.parse(dryRun.stdout);
+    assertSingle(changeSet, "package.json");
+    assertSingle(changeSet, "wrangler.jsonc");
 
-    const apply = run(["kit", "ai-app", "--apply", "--yes", "--json", "--cwd", tmp]);
+    const apply = run([...stack, "--apply", "--yes", "--json", "--cwd", tmp]);
     assertEqual(apply.status, 0, apply.stderr);
 
     for (const change of changeSet.changes ?? []) {
       const written = readFileSync(path.join(tmp, change.path), "utf8");
       if (written !== change.after) {
-        throw new Error(`Kit parity mismatch at ${change.path}: applied bytes differ from previewed bytes.`);
+        throw new Error(`Compose parity mismatch at ${change.path}: applied bytes differ from previewed bytes.`);
       }
     }
   } finally {
@@ -86,12 +79,17 @@ function smokeKitParity() {
   }
 }
 
-function smokeKitUnknownAndGating() {
-  const unknown = run(["kit", "nope", "--dry-run", "--json", "--cwd", fixture]);
-  assertEqual(unknown.status, 4, "Unknown kit should exit 4.");
+function smokeComposeErrors() {
+  // no add-ons -> usage error (exit 4).
+  const empty = run(["compose", "--dry-run", "--json", "--cwd", fixture]);
+  assertEqual(empty.status, 4, "Empty compose should exit 4.");
+
+  // unknown add-on in the list -> error change set (exit 4).
+  const unknown = run(["compose", "r2", "uploads", "+", "nope", "--dry-run", "--json", "--cwd", fixture]);
+  assertEqual(unknown.status, 4, "Unknown add-on in compose should exit 4.");
   assertEqual(JSON.parse(unknown.stdout).status, "error");
 
-  // next-opennext must refuse non-Next projects.
+  // next-opennext must still refuse non-Next projects.
   const hono = mkdtempSync(path.join(tmpdir(), "flarecel-hono-"));
   try {
     writeFileSync(path.join(hono, "package.json"), JSON.stringify({ name: "h", dependencies: { hono: "^4.0.0" } }));
@@ -124,7 +122,7 @@ function smokeExitCodeThree() {
       throw new Error("Expected auth-secret-missing issue.");
     }
 
-    // Declaring the secret clears it.
+    // declaring the secret clears it.
     writeFileSync(path.join(tmp, "cloudflare-env.d.ts"), "interface CloudflareEnv { BETTER_AUTH_SECRET: string; }\n");
     const cleared = run(["doctor", "--json", "--cwd", tmp]);
     if (cleared.status === 3) throw new Error("Declaring the secret should clear exit 3.");
@@ -138,7 +136,7 @@ function smokeTomlVerify() {
   const report = JSON.parse(verify.stdout);
   assertCheck(report, "wrangler-toml-unverified", "warning");
 
-  // A recipe against a TOML project should warn about generated wrangler.jsonc.
+  // an add-on against a TOML project should warn about generated wrangler.jsonc.
   const tmp = mkdtempSync(path.join(tmpdir(), "flarecel-toml-"));
   try {
     cpSync(tomlFixture, tmp, { recursive: true });
@@ -146,11 +144,111 @@ function smokeTomlVerify() {
     assertEqual(result.status, 0, result.stderr);
     const changeSet = JSON.parse(result.stdout);
     if (!changeSet.warnings.some((w) => w.includes("wrangler.jsonc") && w.includes("ambiguous"))) {
-      throw new Error("Expected TOML ambiguity warning on recipe output.");
+      throw new Error("Expected TOML ambiguity warning on add-on output.");
     }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+function smokeWranglerAuthVerify() {
+  const tmp = mkdtempSync(path.join(tmpdir(), "flarecel-wrangler-auth-"));
+  try {
+    writeReadyProject(tmp);
+    writeFakeWrangler(tmp, 1);
+
+    const missing = run(["verify", "--json", "--cwd", tmp]);
+    assertEqual(missing.status, 3, "failed wrangler whoami should exit 3.");
+    const missingReport = JSON.parse(missing.stdout);
+    assertEqual(missingReport.status, "secrets-missing");
+    if (missingReport.cloudflareAuth?.service !== "cloudflare" || missingReport.cloudflareAuth?.state !== "out") {
+      throw new Error("verify JSON should expose failed Cloudflare auth status");
+    }
+    assertCheck(missingReport, "wrangler-auth", "failed");
+    if (!missingReport.nextActions.includes("wrangler login")) {
+      throw new Error("wrangler-auth failure should recommend wrangler login.");
+    }
+
+    writeFakeWrangler(tmp, 0);
+    const authed = run(["verify", "--json", "--cwd", tmp]);
+    const authedReport = JSON.parse(authed.stdout);
+    if (authedReport.cloudflareAuth?.state !== "in") {
+      throw new Error("verify JSON should expose signed-in Cloudflare auth status");
+    }
+    assertCheck(authedReport, "wrangler-auth", "passed");
+
+    rmSync(path.join(tmp, "node_modules"), { recursive: true, force: true });
+    const noWranglerBin = mkdtempSync(path.join(tmpdir(), "flarecel-no-wrangler-"));
+    const skipped = spawnSync(process.execPath, [cli, "verify", "--json", "--cwd", tmp], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, PATH: noWranglerBin }
+    });
+    const skippedReport = JSON.parse(skipped.stdout);
+    assertCheck(skippedReport, "wrangler-auth", "warning");
+    rmSync(noWranglerBin, { recursive: true, force: true });
+
+    const globalBin = mkdtempSync(path.join(tmpdir(), "flarecel-global-wrangler-"));
+    writeFakeGlobalWrangler(globalBin, 0);
+    const global = spawnSync(process.execPath, [cli, "verify", "--json", "--cwd", tmp], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${globalBin}${path.delimiter}${process.env.PATH}` }
+    });
+    const globalReport = JSON.parse(global.stdout);
+    if (globalReport.cloudflareAuth?.state !== "in") {
+      throw new Error("verify JSON should use global wrangler auth when project-local wrangler is missing");
+    }
+    assertCheck(globalReport, "wrangler-auth", "passed");
+    rmSync(globalBin, { recursive: true, force: true });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+function writeReadyProject(dir) {
+  writeFileSync(path.join(dir, "package.json"), JSON.stringify({
+    name: "ready",
+    dependencies: {
+      next: "^15.0.0",
+      "@opennextjs/cloudflare": "^1.19.11"
+    },
+    devDependencies: {
+      wrangler: "^4.97.0"
+    },
+    scripts: {
+      preview: "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+      deploy: "opennextjs-cloudflare build && opennextjs-cloudflare deploy"
+    }
+  }));
+  writeFileSync(path.join(dir, "wrangler.jsonc"), JSON.stringify({
+    name: "ready",
+    main: ".open-next/worker.js",
+    compatibility_date: "2026-01-01",
+    compatibility_flags: ["nodejs_compat", "global_fetch_strictly_public"]
+  }));
+}
+
+function writeFakeWrangler(dir, code) {
+  const binDir = path.join(dir, "node_modules", ".bin");
+  mkdirSync(binDir, { recursive: true });
+  const bin = path.join(binDir, "wrangler");
+  writeWranglerScript(bin, code);
+}
+
+function writeFakeGlobalWrangler(dir, code) {
+  mkdirSync(dir, { recursive: true });
+  const bin = path.join(dir, "wrangler");
+  writeWranglerScript(bin, code);
+}
+
+function writeWranglerScript(bin, code) {
+  writeFileSync(bin, `#!/usr/bin/env node
+if (process.argv[2] !== "whoami") process.exit(2);
+${code === 0 ? "console.log('authenticated');" : "console.error('Not authenticated. Run wrangler login.');"}
+process.exit(${code});
+`);
+  chmodSync(bin, 0o755);
 }
 
 function copyFixture(prefix) {

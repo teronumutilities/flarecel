@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { runCommand } from "./exec.js";
 import { redactSecrets } from "./redact.js";
+import { projectName } from "./project.js";
 import type { ProjectContext } from "./types.js";
 
 export interface ProvisionAction {
@@ -95,9 +96,11 @@ export function createProvisionPlan(ctx: ProjectContext): ProvisionReport {
 
   const queues = config.queues;
   if (queues && typeof queues === "object" && !Array.isArray(queues)) {
+    const seenQueues = new Set<string>();
     for (const producer of objectArray((queues as Record<string, unknown>).producers)) {
       const queueName = stringValue(producer.queue);
-      if (!queueName) continue;
+      if (!queueName || seenQueues.has(queueName)) continue;
+      seenQueues.add(queueName);
 
       actions.push({
         id: `queue:${queueName}`,
@@ -107,6 +110,44 @@ export function createProvisionPlan(ctx: ProjectContext): ProvisionReport {
         reason: "Queue producer bindings need a matching remote Queue.",
         status: "planned"
       });
+    }
+    // consumer-only queues also need the remote queue to exist.
+    for (const consumer of objectArray((queues as Record<string, unknown>).consumers)) {
+      const queueName = stringValue(consumer.queue);
+      if (!queueName || seenQueues.has(queueName)) continue;
+      seenQueues.add(queueName);
+
+      actions.push({
+        id: `queue:${queueName}`,
+        type: "queue",
+        title: `Create Queue ${queueName}`,
+        command: ["wrangler", "queues", "create", queueName],
+        reason: "Queue consumer bindings need a matching remote Queue.",
+        status: "planned"
+      });
+    }
+  }
+
+  for (const hyperdrive of objectArray(config.hyperdrive)) {
+    const binding = stringValue(hyperdrive.binding);
+    if (!binding) continue;
+    const id = stringValue(hyperdrive.id);
+    const configName = `${projectName(ctx)}-${binding.toLowerCase()}`;
+    actions.push({
+      id: `hyperdrive:${binding}`,
+      type: "manual",
+      title: `Create Hyperdrive config for ${binding}`,
+      // connection string is a secret — never embed it. Name the command and
+      // let the user supply --connection-string themselves.
+      command: [],
+      reason: id && !id.includes("replace")
+        ? "Hyperdrive binding is configured. Skip if the config already exists."
+        : `Run: wrangler hyperdrive create ${configName} --connection-string="postgres://USER:PASSWORD@HOST:5432/DB", then copy the returned id into wrangler.jsonc. Flarecel does not embed the connection string (it is a secret).`,
+      status: "skipped"
+    });
+
+    if (!id || id.includes("replace")) {
+      warnings.push(`Hyperdrive binding ${binding} has a placeholder id. Create the config with your DB connection string, then update wrangler.jsonc.`);
     }
   }
 
@@ -206,12 +247,21 @@ export function createProvisionPlan(ctx: ProjectContext): ProvisionReport {
     });
   }
 
+  const needsAccountSpecificCommands = actions.some((action) => action.command.length > 0);
+  if (needsAccountSpecificCommands && !hasPinnedAccount(ctx)) {
+    warnings.push("Provisioning creates Cloudflare account resources. If Wrangler can see multiple accounts, set account_id in Wrangler config or CLOUDFLARE_ACCOUNT_ID before running --apply.");
+  }
+
   return {
     status: actions.length > 0 ? "planned" : "empty",
     actions,
     warnings,
     nextActions: actions.length > 0
-      ? ["flarecel provision --apply --yes", "flarecel verify --json"]
+      ? [
+        ...(!hasPinnedAccount(ctx) ? ["Set account_id in Wrangler config or CLOUDFLARE_ACCOUNT_ID if you have multiple Cloudflare accounts."] : []),
+        "flarecel provision --apply --yes",
+        "flarecel verify --json"
+      ]
       : ["flarecel add r2 uploads --dry-run --format patch"]
   };
 }
@@ -226,7 +276,7 @@ export async function applyProvisionPlan(ctx: ProjectContext, report: ProvisionR
     }
 
     const [command, ...args] = action.command;
-    const result = await runCommand(command, args, ctx.cwd);
+    const result = await runCommand(command, args, ctx.cwd, { timeoutMs: 3 * 60_000 });
 
     actions.push({
       ...action,
@@ -255,6 +305,11 @@ function objectArray(value: unknown): Array<Record<string, unknown>> {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function hasPinnedAccount(ctx: ProjectContext): boolean {
+  return Boolean(process.env.CLOUDFLARE_ACCOUNT_ID) ||
+    Boolean(ctx.wrangler.data && typeof ctx.wrangler.data.account_id === "string" && ctx.wrangler.data.account_id.length > 0);
 }
 
 interface FlarecelResources {

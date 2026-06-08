@@ -2,7 +2,7 @@ import { listManifests, findManifest } from "./manifest.js";
 
 export interface WhyResult {
   path: string;
-  sources: Array<{ recipe: string; timestamp: string; reason: string }>;
+  sources: Array<{ addOn: string; timestamp: string; reason: string }>;
 }
 
 export function whyFile(cwd: string, filePath: string): WhyResult {
@@ -12,7 +12,7 @@ export function whyFile(cwd: string, filePath: string): WhyResult {
     if (!manifest) continue;
     for (const change of manifest.changes) {
       if (change.path === filePath) {
-        sources.push({ recipe: manifest.recipe, timestamp: manifest.timestamp, reason: change.reason });
+        sources.push({ addOn: manifest.addOn, timestamp: manifest.timestamp, reason: change.reason });
       }
     }
   }

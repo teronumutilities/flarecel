@@ -1594,6 +1594,66 @@ Keep this lightweight. The CLI is still the product.
 - production deploy guardrails
 - cost estimator
 
+### Field verdict: semantic migration intelligence (2026-06-05)
+
+After watching an agent run a full migration audit on a large real Next.js
+app (Next 16, React 19, Supabase, Polar, client-side PDF), the signal was
+very good. The agent used Flarecel exactly as intended:
+
+```txt
+doctor -> plan -> fix dry-run -> verify -> cloudflare -> provision -> cost
+```
+
+It did not get lost. Flarecel already works as an **agent migration
+auditor**. Not full "Vercel to Cloudflare one-click" yet, but it gave the
+agent enough rails to produce a sane report instead of vibes.
+
+Strongest wins from that run:
+
+- Correctly blocked on missing OpenNext + Wrangler.
+- Produced a reviewable 6-file patch without writing.
+- Estimated cost.
+- Confirmed no D1/R2/KV/Queue provisioning was needed.
+- Kept production deploy gated.
+- Gave the agent enough structure to explain the migration path.
+
+That gap became an alpha feature:
+
+```bash
+flarecel env --json
+flarecel secrets plan --json
+flarecel migrate vercel --json
+```
+
+It detects:
+
+- server-only secrets
+- `NEXT_PUBLIC_*` public vars
+- webhook secrets
+- provider keys
+- which ones need `wrangler secret put`
+- which ones belong in plain vars
+- missing `.dev.vars`
+- Vercel/Turborepo env names without needing Vercel login
+
+Vercel-specific behavior detection is also stronger now. `migrate vercel`
+scans for `maxDuration`, `next/image`, middleware/proxy files, ISR/revalidation
+usage, Vercel env names, and `@vercel/*` package dependencies even when
+`vercel.json` is missing.
+
+Verdict: Flarecel has the right bones. The CLI is already good enough for
+agents to run a serious migration audit. The next moat is **semantic
+migration intelligence**:
+
+- env/secrets mapping
+- Vercel config/features mapping
+- image optimization warnings
+- long-running route warnings
+- middleware/proxy runtime verification
+- post-patch runtime boot test
+
+This is not slop. This is a product screaming where v0.2 should go.
+
 ---
 
 ## 19. Testing Strategy

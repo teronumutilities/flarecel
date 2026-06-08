@@ -1,3 +1,5 @@
+import type { LoginStatus } from "./auth-status.js";
+
 export type Framework =
   | "nextjs"
   | "vite"
@@ -6,6 +8,8 @@ export type Framework =
   | "sveltekit"
   | "hono"
   | "tanstack-start"
+  | "cloudflare-pages"
+  | "cloudflare-workers"
   | "unknown";
 
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun" | "unknown";
@@ -53,6 +57,8 @@ export interface ProjectContext {
   hasOpenNext: boolean;
   hasNextOnPages: boolean;
   sourceRisks: SourceRisk[];
+  routeCount: number;
+  apiRouteCount: number;
 }
 
 export interface Issue {
@@ -62,7 +68,7 @@ export interface Issue {
   message: string;
   file?: string;
   fixable: boolean;
-  recipe?: string;
+  addOn?: string;
   recommendedCommand?: string;
 }
 
@@ -109,6 +115,7 @@ export interface ChangeSet {
   changes: PlannedChange[];
   warnings: string[];
   nextActions: string[];
+  vercelAuth?: LoginStatus;
 }
 
 export interface VerifyCheck {
@@ -120,7 +127,7 @@ export interface VerifyCheck {
 export interface VerifyReport {
   status: Status;
   project: DoctorReport["project"];
+  cloudflareAuth: LoginStatus;
   checks: VerifyCheck[];
   nextActions: string[];
 }
-

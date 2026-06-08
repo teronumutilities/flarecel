@@ -1,15 +1,15 @@
-// Opt-in deep verification for experimental provider recipes.
+// opt-in deep verification for experimental provider recipes.
 //   node scripts/verify-providers.mjs           # all providers
 //   node scripts/verify-providers.mjs turso     # filter by substring
 //
-// For each provider this installs the REAL packages the recipe declares and
+// for each provider this installs the REAL packages the recipe declares and
 // type-checks the recipe's third-party import statements against the real
 // type definitions. This catches wrong package names, wrong subpath exports
 // (e.g. @libsql/client/web), and wrong named exports (e.g. PrismaD1) — the
 // exact failure modes that "does it parse" cannot catch.
 //
-// It does NETWORK npm installs, so it is intentionally separate from `npm test`.
-// Framework imports (next/*) and relative imports are not verified here; they
+// it does NETWORK npm installs, so it is intentionally separate from `npm test`.
+// framework imports (next/*) and relative imports are not verified here; they
 // are the user's project, not something the recipe installs.
 import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -136,7 +136,7 @@ function pkgBase(spec) {
   return spec.split("/")[0];
 }
 
-// Prerelease ranges (e.g. ^5.0.0-beta.31) must install the exact version;
+// prerelease ranges (e.g. ^5.0.0-beta.31) must install the exact version;
 // caret matching does not span prerelease tags reliably.
 function installRange(range) {
   return range.includes("-") ? range.replace(/^[\^~]/, "") : range;

@@ -4,9 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProjectContext, VerifyCheck, VerifyReport } from "./types.js";
 import { runDoctor } from "./doctor.js";
+import { cloudflareAuthStatus, formatCloudflareAuthStatus, type LoginStatus } from "./auth-status.js";
 
 export function runVerify(ctx: ProjectContext): VerifyReport {
   const doctor = runDoctor(ctx);
+  const cloudflareAuth = cloudflareAuthStatus(ctx.cwd);
   const checks: VerifyCheck[] = [];
 
   checks.push({
@@ -25,13 +27,17 @@ export function runVerify(ctx: ProjectContext): VerifyReport {
       : "No wrangler config found."
   });
 
+  addCompatibilityDateCheck(ctx, checks);
+
   if (ctx.wrangler.format === "toml") {
     checks.push({
       id: "wrangler-toml-unverified",
       status: "warning",
-      message: "wrangler.toml detected. Flarecel verifies and patches JSONC config; binding checks are skipped for TOML."
+      message: "wrangler.toml detected. Flarecel can inspect common TOML bindings, but patches are generated as JSONC."
     });
   }
+
+  addWranglerAuthCheck(ctx, checks, cloudflareAuth);
 
   if (ctx.framework === "nextjs") {
     checks.push({
@@ -74,23 +80,83 @@ export function runVerify(ctx: ProjectContext): VerifyReport {
     });
   }
 
-  const failed = checks.some((check) => check.status === "failed");
+  const wranglerAuthMissing = checks.some((check) => check.id === "wrangler-auth" && check.status === "failed");
+  const failed = checks.some((check) => check.status === "failed" && check.id !== "wrangler-auth");
+  const secretsMissing = doctor.status === "secrets-missing" || wranglerAuthMissing;
   const warning = checks.some((check) => check.status === "warning") || doctor.status === "warning";
 
   return {
-    status: failed ? "blocking" : warning ? "warning" : "ready",
+    status: failed ? "blocking" : secretsMissing ? "secrets-missing" : warning ? "warning" : "ready",
     project: doctor.project,
+    cloudflareAuth,
     checks,
     nextActions: failed
       ? ["flarecel doctor --json", "flarecel fix --dry-run --format patch"]
+      : secretsMissing
+        ? credentialNextActions(doctor.status === "secrets-missing", wranglerAuthMissing)
       : warning
         ? ["Review warnings, then run npm run preview."]
         : ["npm run preview", "flarecel deploy --preview --yes"]
   };
 }
 
+function addCompatibilityDateCheck(ctx: ProjectContext, checks: VerifyCheck[]): void {
+  const date = typeof ctx.wrangler.data?.compatibility_date === "string"
+    ? ctx.wrangler.data.compatibility_date
+    : null;
+  if (!date) return;
+
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const validDate = /^\d{4}-\d{2}-\d{2}$/.test(date);
+  checks.push({
+    id: "compatibility-date",
+    status: validDate && date <= todayUtc ? "passed" : "failed",
+    message: validDate
+      ? date <= todayUtc
+        ? `compatibility_date ${date} is not in the future.`
+        : `compatibility_date ${date} is in the future for Cloudflare API time (${todayUtc}).`
+      : `compatibility_date must use YYYY-MM-DD, got ${date}.`
+  });
+}
+
 function usesBetterAuth(ctx: ProjectContext): boolean {
   return Boolean(ctx.allDependencies["better-auth"]) || Boolean(findFirstExisting(ctx, betterAuthRouteCandidates()));
+}
+
+function addWranglerAuthCheck(ctx: ProjectContext, checks: VerifyCheck[], auth: LoginStatus): void {
+  if (!ctx.wrangler.path || ctx.wrangler.parseError) return;
+
+  if (auth.state === "in") {
+    checks.push({
+      id: "wrangler-auth",
+      status: "passed",
+      message: formatCloudflareAuthStatus(auth)
+    });
+    return;
+  }
+
+  if (auth.state === "unknown") {
+    checks.push({
+      id: "wrangler-auth",
+      status: "warning",
+      message: formatCloudflareAuthStatus(auth)
+    });
+    return;
+  }
+
+  checks.push({
+    id: "wrangler-auth",
+    status: "failed",
+    message: formatCloudflareAuthStatus(auth)
+  });
+}
+
+function credentialNextActions(authSecretMissing: boolean, wranglerAuthMissing: boolean): string[] {
+  const actions: string[] = [];
+  if (authSecretMissing) actions.push("wrangler secret put BETTER_AUTH_SECRET");
+  if (wranglerAuthMissing) actions.push("wrangler login");
+  actions.push("flarecel verify --json");
+  return actions;
 }
 
 function addCloudflareBindingChecks(ctx: ProjectContext, checks: VerifyCheck[]): void {
@@ -424,7 +490,7 @@ function findFirstExisting(ctx: ProjectContext, relativePaths: string[]): string
   return relativePaths.find((relativePath) => existsSync(path.join(ctx.cwd, relativePath))) ?? null;
 }
 
-// Opt-in: boots the built worker in workerd via scripts/verify-runtime.mjs.
+// opt-in: boots the built worker in workerd via scripts/verify-runtime.mjs.
 // Returns a VerifyCheck; degrades to a warning if skipped (no build / no miniflare).
 export function runRuntimeCheck(ctx: ProjectContext): VerifyCheck {
   const scriptPath = path.join(fileURLToPath(new URL(".", import.meta.url)), "..", "scripts", "verify-runtime.mjs");

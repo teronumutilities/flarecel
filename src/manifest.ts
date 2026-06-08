@@ -6,29 +6,31 @@ import type { ChangeSet, PlannedChange } from "./types.js";
 const MANIFEST_DIR = ".flarecel/applied";
 
 export interface Manifest {
-  recipe: string;
+  addOn: string;
   timestamp: string;
   changes: PlannedChange[];
 }
 
-export async function writeManifest(cwd: string, recipe: string, changeSet: ChangeSet): Promise<void> {
+export async function writeManifest(cwd: string, addOn: string, changeSet: ChangeSet): Promise<void> {
   const dir = path.join(cwd, MANIFEST_DIR);
   await fs.mkdir(dir, { recursive: true });
   const manifest: Manifest = {
-    recipe,
+    addOn,
     timestamp: new Date().toISOString(),
     changes: changeSet.changes
   };
-  const slug = recipe.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  const slug = addOn.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   await fs.writeFile(path.join(dir, `${slug}.json`), JSON.stringify(manifest, null, 2) + "\n", "utf8");
 }
 
-export function findManifest(cwd: string, recipe: string): Manifest | null {
+export function findManifest(cwd: string, addOn: string): Manifest | null {
   const dir = path.join(cwd, MANIFEST_DIR);
-  const slug = recipe.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  const slug = addOn.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const file = path.join(dir, `${slug}.json`);
   try {
-    return JSON.parse(readFileSync(file, "utf8")) as Manifest;
+    const raw = JSON.parse(readFileSync(file, "utf8")) as Manifest & { recipe?: string };
+    // back-compat: manifests written before the add-on rename used `recipe`.
+    return { ...raw, addOn: raw.addOn ?? raw.recipe ?? slug };
   } catch {
     return null;
   }
@@ -36,14 +38,14 @@ export function findManifest(cwd: string, recipe: string): Manifest | null {
 
 export interface RemoveResult {
   status: "planned" | "applied" | "refused" | "not-found";
-  recipe: string;
+  addOn: string;
   changes: PlannedChange[];
   conflicts: Array<{ path: string; expected: string; actual: string }>;
 }
 
-export async function createRemoveChangeSet(cwd: string, recipe: string, force: boolean): Promise<RemoveResult> {
-  const manifest = findManifest(cwd, recipe);
-  if (!manifest) return { status: "not-found", recipe, changes: [], conflicts: [] };
+export async function createRemoveChangeSet(cwd: string, addOn: string, force: boolean): Promise<RemoveResult> {
+  const manifest = findManifest(cwd, addOn);
+  if (!manifest) return { status: "not-found", addOn, changes: [], conflicts: [] };
 
   const conflicts: RemoveResult["conflicts"] = [];
   const changes: PlannedChange[] = [];
@@ -60,20 +62,20 @@ export async function createRemoveChangeSet(cwd: string, recipe: string, force: 
       continue;
     }
 
-    // Invert: restore before content, or delete if file was created from nothing.
+    // invert: restore before content, or delete if file was created from nothing.
     changes.push({
       path: change.path,
       before: current,
       after: change.before ?? "", // empty string = will be deleted
-      reason: `Remove: revert ${change.path} from recipe ${recipe}`
+      reason: `Remove: revert ${change.path} from add-on ${addOn}`
     });
   }
 
   if (conflicts.length > 0 && !force) {
-    return { status: "refused", recipe, changes: [], conflicts };
+    return { status: "refused", addOn, changes: [], conflicts };
   }
 
-  return { status: "planned", recipe, changes, conflicts: [] };
+  return { status: "planned", addOn, changes, conflicts: [] };
 }
 
 export async function applyRemove(cwd: string, result: RemoveResult): Promise<RemoveResult> {

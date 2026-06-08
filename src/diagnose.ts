@@ -1,5 +1,5 @@
-// Map runtime/deploy error text to existing doctor issue IDs + suggested fixes.
-// Strips ANSI before matching so piped wrangler output works directly.
+// map runtime/deploy error text to existing doctor issue IDs + suggested fixes.
+// strips ANSI before matching so piped wrangler output works directly.
 
 export interface DiagnoseMatch {
   pattern: string;
