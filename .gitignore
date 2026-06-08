@@ -5,3 +5,5 @@ dist
 outputs
 .env
 .env.*
+CLAUDE.md
+flarecel-feature-spec.md

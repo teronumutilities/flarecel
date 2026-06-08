@@ -2,6 +2,7 @@
   "name": "flarecel",
   "version": "0.1.0-alpha.0",
   "description": "Agent-friendly Cloudflare Workers deployment assistant.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "flarecel": "./dist/cli.js"
