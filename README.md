@@ -6,6 +6,23 @@ Flarecel is an agent-friendly Cloudflare Workers deployment assistant. The first
 
 It is not a hosting platform and it is not affiliated with Cloudflare or Vercel.
 
+## "Isn't Cloudflare building their own CLI?"
+
+Yes. Cloudflare is rebuilding Wrangler into [`cf`](https://www.theregister.com/2026/04/13/cloudflare_expanding_wrangler_cli_functionality/) — one agent-first CLI for their whole API surface — and agents can now [provision accounts and deploy in one shot](https://blog.cloudflare.com/agents-stripe-projects/). So part of what Flarecel does (provisioning, deploys) will get absorbed by the platform. We expect it, and Flarecel happily calls Wrangler/`cf` underneath rather than competing with it.
+
+But here's the thing they aren't building: **`cf` deploys greenfield apps. It does not fix the broken ones.**
+
+Cloudflare's flow assumes an agent is building something *new*. Flarecel exists for the messy reality — an existing Next.js app that was written for Vercel and now has to run on Workers:
+
+- Worker-hostile packages and Node-only imports that quietly break at the edge.
+- `vercel.json` redirects, headers, crons, and `@vercel/*` coupling that don't port.
+- ISR, middleware, `maxDuration`, `next/image` assumptions baked in everywhere.
+- The honest cost question: *what does leaving Vercel actually cost me?*
+
+That's the part nobody at the platform vendor is going to build for you — because "here's how to migrate off the competitor" isn't their job. It's ours.
+
+**They handle the happy path. We handle the broken Vercel migration.** Don't sumi.
+
 ## Quick Start
 
 ```bash
