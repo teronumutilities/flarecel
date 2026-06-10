@@ -12,6 +12,7 @@ flarecel secrets plan --json
 flarecel verify --json
 flarecel provision --json
 flarecel cost --json
+flarecel ci --dry-run --format patch
 ```
 
 Rules:
@@ -41,6 +42,7 @@ Rules:
 - Use `migrate vercel` even when `vercel.json` is missing if the app came from Vercel; it also scans source/env/package signals like middleware, ISR, maxDuration, next/image, and @vercel packages.
 - Use `explain <issue-id>` for a plain-language description of any doctor finding.
 - Treat `cost --compare vercel` as a labeled estimate only (never a quote); it always emits a disclaimer.
+- Use `flarecel ci` to scaffold a GitHub Actions workflow that deploys to Cloudflare on push. It is a file-changing command: dry-run by default, write with `--apply --yes`. It needs a `CLOUDFLARE_API_TOKEN` repo secret — treat that as setup work (`gh secret set CLOUDFLARE_API_TOKEN`), never a generated value, and never print it.
 - `verify --runtime` is opt-in and boots the built worker in workerd; it is not part of `npm test`.
 
 Exit codes (every command):

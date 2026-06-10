@@ -44,6 +44,7 @@ import { writeManifest, createRemoveChangeSet, applyRemove } from "./manifest.js
 import { whyFile } from "./why.js";
 import { applyProvisionPlan, createProvisionPlan } from "./provision.js";
 import { createFixChangeSet, createAddOnChangeSet, externalIntegrationAddOn } from "./addon-dispatch.js";
+import { createCiChangeSet } from "./ci.js";
 import { runVerify, runRuntimeCheck } from "./verify.js";
 import { redactSecrets } from "./redact.js";
 import { setColorEnabled, c, sym, banner, startSpinner, splash, playVersus, visibleWidth } from "./ui.js";
@@ -229,6 +230,15 @@ async function main(): Promise<void> {
   if (args.command === "fix") {
     const report = runDoctor(ctx);
     const changeSet = await createFixChangeSet(ctx, report);
+    await handleChangeSet(cwd, args, changeSet);
+    return;
+  }
+
+  if (args.command === "ci") {
+    const changeSet = await createCiChangeSet(ctx, {
+      provider: getFlag(args, "provider") ?? "github",
+      branch: getFlag(args, "branch") ?? "main"
+    });
     await handleChangeSet(cwd, args, changeSet);
     return;
   }

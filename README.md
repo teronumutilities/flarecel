@@ -71,6 +71,7 @@ flarecel verify
 flarecel provision --json
 flarecel cost --requests 1000000 --cpu-ms 7 --json
 flarecel deploy --preview --yes
+flarecel ci --dry-run
 flarecel open
 flarecel menu
 flarecel mcp
@@ -208,6 +209,7 @@ Implemented now:
 - Pinned add-on dependency versions (caret ranges) instead of `latest`, with `npm run update-versions` to refresh safely and `npm run verify:providers` to type-check provider add-ons against the real installed packages.
 - Provision planning from Wrangler bindings.
 - Cost estimation and gated preview/production deploy planning.
+- `flarecel ci` generates a GitHub Actions workflow that deploys to Cloudflare on push (push to `main` + manual `workflow_dispatch`). Dry-run by default, written with `--apply --yes`, package-manager aware, and uses the project's own `deploy` script for Next.js/OpenNext or `cloudflare/wrangler-action` otherwise. It expects a `CLOUDFLARE_API_TOKEN` repo secret and never reads or writes that token.
 - Worker versions listing and gated production rollback (`versions`, `rollback --yes`).
 - Stdio MCP server with tool discovery, prompts/resources, core tool calls, structured progress, compose previews, Vercel migration previews, env/secrets audits, issue explanations, and error diagnosis. MCP `apply_patch` records add-on manifests so `why` and `remove` still work after agents apply changes.
 - Lightweight `flarecel open` local report generation.
@@ -218,3 +220,51 @@ Still future:
 - Rich Cloudflare resource provisioning UX.
 - Domains, logs, and analytics. These are post-launch operations, not v1 blockers: domains help production cutover, logs help debugging deployed Workers, and analytics help cost/perf review later.
 - Full visual local UI.
+
+## Field notes — 2026-06-10 end-to-end run
+
+A real build done entirely through Flarecel: a plain Worker site with a
+D1-backed guestbook, Turnstile, secrets, a custom domain, and a cross-account
+migration. What held up, and where the seams showed.
+
+**Held up well**
+
+- `doctor` / `verify --json`: readiness 100, framework auto-detect, structured
+  checks — an agent parsed and acted on the output with zero text-scraping.
+- Error → next-action mapping: `deploy --preview` against a not-yet-created
+  Worker failed with the exact fix ("bootstrap once with `deploy --production
+  --yes`"). Saved a debugging loop — this is the strongest part of the UX.
+- Honest cost: surfaced the `$5` paid floor + range instead of faking "free."
+- Dry-run-by-default on `add` produced a full, reviewable patch plan.
+
+**Seams (concrete, prioritized)**
+
+1. **Provisioning loop isn't closed** (→ "Rich Cloudflare resource provisioning
+   UX"). `add db d1` scaffolds the binding but hands off to manual `wrangler d1
+   create` + pasting the `database_id` back into `wrangler.jsonc`. Running the
+   create and writing the id back (with confirmation) would remove the only
+   reason this run dropped to raw wrangler for storage.
+2. **Secrets are plan-only.** `secrets plan` emits the right `wrangler secret
+   put` commands but doesn't set them; setting `ADMIN_KEY` / `TURNSTILE_SECRET`
+   was raw wrangler. A gated `secrets set` would finish the loop that `env` /
+   `secrets plan` start.
+3. **Error pass-through degrades off the happy path** (→ "Domains"). A
+   custom-domain trigger failure surfaced only as "some triggers failed"; the
+   actionable cause (apex already had an externally-managed DNS record, CF API
+   code `100117`) was buried in wrangler logs and needed a raw API call to find.
+   Flarecel already excels at error→next-action where it has a model — extend
+   that to common trigger/DNS conflicts ("delete the conflicting apex record,
+   then redeploy").
+4. **No multi-account model.** A cross-account migration (switch `account_id`,
+   recreate D1, rebind domain) was all manual edits + raw API. A target-account
+   concept / `--account` flag would make migration — and "you're on the wrong
+   account" — a first-class, guard-railed flow.
+5. **D1 add-on is ORM-opinionated.** `add db d1` assumes Drizzle + a migrations
+   toolchain; for a single-table app that's overkill, so this run bypassed it
+   with native D1. A `--orm none` / raw-D1 variant keeps lean cases inside the
+   tool.
+
+**Net:** the diagnose → explain → safe-patch → gated-deploy spine is strong and
+the guardrails are tasteful. The fall-throughs are all infra plumbing (D1
+create, secrets, domains, accounts) — exactly the "Still future" provisioning
+items above, now with concrete failure modes to design against.

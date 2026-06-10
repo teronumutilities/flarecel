@@ -14,7 +14,7 @@ export const COMMAND_GROUPS: CommandGroup[] = [
   { title: "Diagnose", paint: c.cyan, cmds: ["progress", "onboard", "auth", "doctor", "cloudflare", "env", "secrets plan", "doctor --fix", "doctor --baseline", "doctor --diff", "plan", "explain <id>", "diagnose <error>", "why <path>", "verify", "cost"] },
   { title: "Fix & migrate", paint: c.green, cmds: ["fix --dry-run", "fix --apply --yes", "remove <add-on>", "migrate vercel"] },
   { title: "Add features", paint: c.magenta, cmds: ["add r2 uploads", "add db d1 --orm drizzle", "add auth better-auth", "add saas-billing", "add stripe", "add resend", "add <add-on>", "compose <add-ons>", "catalog list"] },
-  { title: "Ship", paint: c.orange, cmds: ["provision", "deploy --preview --yes", "deploy --production --yes", "versions", "rollback --yes", "open", "mcp"] }
+  { title: "Ship", paint: c.orange, cmds: ["provision", "deploy --preview --yes", "deploy --production --yes", "ci", "versions", "rollback --yes", "open", "mcp"] }
 ];
 
 export const COMMAND_EXPLANATIONS: Record<string, string> = {
@@ -50,6 +50,7 @@ export const COMMAND_EXPLANATIONS: Record<string, string> = {
   "provision": "Plans Cloudflare resource commands for bindings like R2, D1, KV, Queues, and Vectorize.",
   "deploy --preview --yes": "Runs the preview upload/deploy path after verification passes.",
   "deploy --production --yes": "Runs production deploy. Requires explicit --yes and verification should pass first.",
+  "ci": "Generates a GitHub Actions workflow that deploys to Cloudflare on push. Dry-run by default; write with --apply --yes. Needs a CLOUDFLARE_API_TOKEN repo secret.",
   "open": "Writes a local HTML readiness report for non-technical review.",
   "versions": "Lists recent Worker versions (read-only) so you can pick a rollback target.",
   "rollback --yes": "Reverts production to a previous Worker version. Gated like deploy: requires --yes.",
